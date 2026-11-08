@@ -3,7 +3,7 @@ const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 const express = require('express');
 
-// Serveur web obligatoire pour Render (évite les crashs de déploiement)
+// Serveur web pour garder le bot éveillé sur Render
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Bot bankiozi en ligne 🚀'));
@@ -302,67 +302,5 @@ client.on('interactionCreate', async interaction => {
 
           const row = new ActionRowBuilder().addComponents(selectMember);
           const embed = new EmbedBuilder()
-            .setColor(choice === 'whitelist_add' ? '#2ECC71' : '#E74C3C')
-            .setTitle(choice === 'whitelist_add' ? '✅ Gestion de la Whitelist' : '⛔ Gestion de la Blacklist')
-            .setDescription('Sélectionne le membre concerné :');
-          return await interaction.update({ embeds: [embed], components: [row] });
-        }
-
-        if (choice === 'make_public') {
-          const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator) || userId === interaction.guild.ownerId;
-          let locks = isAdmin ? await db.all(`SELECT * FROM locked_voices`) : await db.all(`SELECT * FROM locked_voices WHERE ownerId = ?`, [userId]);
-
-          if (!locks || locks.length === 0) {
-            return await interaction.reply({ content: `❌ Aucun salon verrouillé sous ton contrôle n'a été trouvé.`, ephemeral: true });
-          }
-
-          const selectVoice = new StringSelectMenuBuilder()
-            .setCustomId('public_voice_select')
-            .setPlaceholder('Sélectionne le salon à rendre public...')
-            .addOptions(locks.map(l => ({ label: `Salon ID: ${l.channelId.slice(0, 15)}`, value: l.channelId })));
-
-          const row = new ActionRowBuilder().addComponents(selectVoice);
-          const embed = new EmbedBuilder().setColor('#2ECC71').setTitle('🔓 Rendre un salon Public (VPU)').setDescription('Sélectionne le salon vocal à déverrouiller :');
-          return await interaction.update({ embeds: [embed], components: [row] });
-        }
-      }
-
-      if (interaction.customId === 'whitelist_member_select') {
-        const targetUserId = interaction.values[0];
-        const memberVoice = interaction.member.voice.channel;
-        if (!memberVoice) return await interaction.reply({ content: `❌ Action expirée.`, ephemeral: true });
-
-        await db.run(`INSERT OR IGNORE INTO allowed_members (channelId, userId) VALUES (?, ?)`, [memberVoice.id, targetUserId]);
-        const embed = new EmbedBuilder().setColor('#2ECC71').setTitle('✅ Membre Whitelisté').setDescription(`Le membre <@${targetUserId}> a été autorisé à rejoindre ta vocale.`);
-        return await interaction.update({ embeds: [embed], components: [] });
-      }
-
-      if (interaction.customId === 'blacklist_member_select') {
-        const targetUserId = interaction.values[0];
-        const memberVoice = interaction.member.voice.channel;
-        if (!memberVoice) return await interaction.reply({ content: `❌ Action expirée.`, ephemeral: true });
-
-        await db.run(`INSERT OR IGNORE INTO blacklisted_members (channelId, userId) VALUES (?, ?)`, [memberVoice.id, targetUserId]);
+            .setColor(choice
         
-        try {
-          const targetMember = await interaction.guild.members.fetch(targetUserId);
-          if (targetMember && targetMember.voice.channelId === memberVoice.id) {
-            await targetMember.voice.disconnect("Tu es blacklisté de ce salon vocal");
-          }
-        } catch (e) {}
-
-        const embed = new EmbedBuilder().setColor('#E74C3C').setTitle('⛔ Membre Blacklisté').setDescription(`Le membre <@${targetUserId}> a été banni de ton salon vocal.`);
-        return await interaction.update({ embeds: [embed], components: [] });
-      }
-
-      if (interaction.customId === 'public_voice_select') {
-        const channelIdToUnlock = interaction.values[0];
-        const lock = await db.get(`SELECT * FROM locked_voices WHERE channelId = ?`, [channelIdToUnlock]);
-        if (!lock) return await interaction.reply({ content: `❌ Ce salon n'est plus verrouillé.`, ephemeral:true });
-
-        const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator) || userId === interaction.guild.ownerId;
-        if (lock.ownerId !== userId && !isAdmin) {
-          return await interaction.reply({ content: `❌ **Sécurité :** Tu n'es pas le propriétaire et tu n'es pas admin.`, ephemeral: true });
-        }
-
-        await db.run(`DELETE FROM locked_voices WHERE channelId = ?`, 
