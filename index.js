@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 
@@ -15,7 +15,11 @@ const client = new Client({
 
 let db;
 const CREATOR_NAME = "bankiozi";
-const activeSpams = new Map(); // Anti-rate-limit pour les spams DM
+
+// Stockage temporaire pour les salons vocaux sécurisés
+const lockedVoiceChannels = new Map(); // channelId -> { ownerId, sanction: true/false }
+// Stockage temporaire pour l'étape de sélection du type de sanction
+const pendingVoiceSetup = new Map(); // userId -> channelId
 
 // --- INITIALISATION DE LA BASE DE DONNÉES ---
 async function initDB() {
@@ -40,10 +44,10 @@ async function initDB() {
       userId TEXT PRIMARY KEY
     );
   `);
-  console.log("📂 Base de données connectée et sécurisée !");
+  console.log("📂 Base de données connectée et sécurisée avec succès !");
 }
 
-// --- GESTION PROPRE DES RÔLES DE NIVEAU (REMPLACEMENT ANCIEN -> NOUVEAU) ---
+// --- GESTION PROPRE DES RÔLES DE NIVEAU ---
 async function checkAndApplyLevelRoles(member, newLevel, channel) {
   if (!member || !member.guild) return;
   const guild = member.guild;
@@ -56,7 +60,6 @@ async function checkAndApplyLevelRoles(member, newLevel, channel) {
     100: 'Légende du message' 
   };
 
-  // Récupérer la liste de tous les rôles de niveau existants sur le serveur
   const allLevelRoleNames = Object.values(roleMap);
   const rolesToRemove = member.roles.cache.filter(r => allLevelRoleNames.includes(r.name));
 
@@ -67,7 +70,6 @@ async function checkAndApplyLevelRoles(member, newLevel, channel) {
     }
   }
 
-  // Trouver ou créer le nouveau rôle cible
   let targetRole = null;
   if (targetRoleName) {
     targetRole = guild.roles.cache.find(r => r.name === targetRoleName);
@@ -78,7 +80,6 @@ async function checkAndApplyLevelRoles(member, newLevel, channel) {
     }
   }
 
-  // Retirer les anciens rôles de niveau inférieurs et ajouter le nouveau
   try {
     for (const role of rolesToRemove.values()) {
       if (!targetRole || role.id !== targetRole.id) {
@@ -90,7 +91,6 @@ async function checkAndApplyLevelRoles(member, newLevel, channel) {
     }
   } catch (e) {}
 
-  // Annonce de niveau dans le salon
   if (channel) {
     const levelEmbed = new EmbedBuilder()
       .setColor('#00FFCC')
@@ -101,7 +101,7 @@ async function checkAndApplyLevelRoles(member, newLevel, channel) {
   }
 }
 
-// --- COMMANDES SLASH (Serveur et Privées) ---
+// --- COMMANDES SLASH SUR LE SERVEUR (Admin & Profil uniquement) ---
 const commands = [
   new SlashCommandBuilder().setName('rank').setDescription('Voir sa carte de niveau et profil'),
   new SlashCommandBuilder().setName('leaderboard').setDescription('Classement général des membres'),
@@ -114,21 +114,7 @@ const commands = [
     .addUserOption(o => o.setName('membre').setDescription('Membre ciblé').setRequired(true))
     .addIntegerOption(o => o.setName('niveau').setDescription('Nouveau niveau').setRequired(true)),
   new SlashCommandBuilder().setName('resetlevel').setDescription('Réinitialiser les niveaux d’un membre (Admin)')
-    .addUserOption(o => o.setName('membre').setDescription('Membre ciblé').setRequired(true)),
-  
-  // Commandes spéciales /code et /dm anonyme /vp
-  new SlashCommandBuilder().setName('code').setDescription('Valider le code secret 2252 (Requiert Niveau 120 en MP)')
-    .addStringOption(o => o.setName('secret').setDescription('Le code secret').setRequired(true)),
-  new SlashCommandBuilder().setName('dmanonyme').setDescription('Envoyer un message anonyme à un membre (Réservé Béni par le bot)')
-    .addUserOption(o => o.setName('membre').setDescription('Destinataire').setRequired(true))
-    .addStringOption(o => o.setName('message').setDescription('Message à envoyer').setRequired(true)),
-  new SlashCommandBuilder().setName('spamdm').setDescription('Spam sécurisé anti-rate-limit (Réservé Béni par le bot)')
-    .addUserOption(o => o.setName('membre').setDescription('Destinataire').setRequired(true))
-    .addIntegerOption(o => o.setName('nombre').setDescription('Nombre de messages').setRequired(true))
-    .addIntegerOption(o => o.setName('secondes').setDescription('Intervalle en secondes').setRequired(true))
-    .addStringOption(o => o.setName('message').setDescription('Message').setRequired(true)),
-  new SlashCommandBuilder().setName('vp').setDescription('Sécuriser un salon vocal (Réservé Béni par le bot)')
-    .addStringOption(o => o.setName('idsalon').setDescription('ID du salon vocal').setRequired(true))
+    .addUserOption(o => o.setName('membre').setDescription('Membre ciblé').setRequired(true))
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
@@ -151,23 +137,137 @@ client.on('guildMemberAdd', async member => {
   try {
     const welcomeEmbed = new EmbedBuilder()
       .setColor('#3498DB')
-      .setTitle(`Bienvenue sur ${member.guild.name} ! 🎉`)
-      .setDescription('Ton compte est désormais relié au bot. Voici les commandes disponibles :\n\n' +
-        '• `/rank` : Voir ton profil (Public)\n' +
-        '• `/leaderboard` : Classement (Public)\n' +
-        '• `/code [code]` : **[Uniquement si tu trouves le code]** À taper en MP avec le bot pour obtenir le rôle spécial !\n' +
-        '• `/dmanonyme` : Envoyer un message anonyme (Après validation du code)\n' +
-        '• `/spamdm` : Spam anti-rate-limit (Après validation du code)\n' +
-        '• `/vp` : Sécuriser un salon vocal (Après validation du code)')
+      .setTitle(`✨ Bienvenue sur ${member.guild.name} !`)
+      .setDescription('Ton compte est connecté au système. En écrivant directement en **Message Privé (DM)** avec moi, tu peux utiliser les commandes secrètes textuelles :\n\n' +
+        '• `!code 2252` : Valider ton code secret (Requiert le niveau 120)\n' +
+        '• `!dmanonyme @Membre Message` : Envoyer un message anonyme\n' +
+        '• `!vp` ou `!vocal` : Lister les salons vocaux du serveur et les sécuriser en privé')
       .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
     await member.send({ embeds: [welcomeEmbed] });
   } catch (e) {}
 });
 
-// --- GESTION DES MESSAGES ET XP ---
+// --- GESTION DES MESSAGES ET COMMANDES TEXTUELLES EN DM ---
 client.on('messageCreate', async message => {
-  if (message.author.bot || !message.guild) return;
+  if (message.author.bot) return;
 
+  // --- COMMANDES TEXTUELLES EN DM ---
+  if (!message.guild) {
+    const content = message.content.trim();
+    const userId = message.author.id;
+
+    // 1. Commande !code
+    if (content.startsWith('!code')) {
+      const args = content.split(' ');
+      const secret = args[1];
+
+      if (secret !== '2252') {
+        return message.reply('❌ Code secret incorrect. Réessaie avec `!code [ton_code]`.');
+      }
+
+      let redeemed = await db.get(`SELECT * FROM redeemed_codes WHERE userId = ?`, [userId]);
+      if (redeemed) {
+        return message.reply('❌ Tu as déjà validé ce code par le passé !');
+      }
+
+      const mutualGuild = client.guilds.cache.find(g => g.members.cache.has(userId));
+      if (!mutualGuild) {
+        return message.reply('❌ Erreur : Tu n’es dans aucun serveur commun avec ce bot.');
+      }
+
+      let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, mutualGuild.id]);
+      const currentLevel = user ? user.level : 0;
+
+      if (currentLevel < 120) {
+        return message.reply(`❌ Condition non remplie ! Tu es actuellement **niveau ${currentLevel}**. Il te faut être minimum **niveau 120** pour valider ce code. Va farmer de l'XP !`);
+      }
+
+      const member = await mutualGuild.members.fetch(userId).catch(() => null);
+      if (member) {
+        let role = mutualGuild.roles.cache.find(r => r.name === 'Béni par le bot');
+        if (!role) {
+          try {
+            role = await mutualGuild.roles.create({ name: 'Béni par le bot', color: '#00FF00', reason: 'Code secret 2252 validé' });
+          } catch (e) {}
+        }
+        if (role) await member.roles.add(role).catch(() => {});
+      }
+
+      await db.run(`INSERT INTO redeemed_codes (userId) VALUES (?)`, [userId]);
+      return message.reply('✅ **Félicitations !** Code validé avec succès. Tu as reçu le rôle **"Béni par le bot"** (en vert) sur le serveur !');
+    }
+
+    // 2. Commande !dmanonyme
+    if (content.startsWith('!dmanonyme')) {
+      let redeemed = await db.get(`SELECT * FROM redeemed_codes WHERE userId = ?`, [userId]);
+      if (!redeemed) {
+        return message.reply('❌ Tu dois d’abord valider ton code secret en tapant `!code 2252` en étant niveau 120.');
+      }
+
+      const targetMention = message.mentions.users.first();
+      const text = content.replace('!dmanonyme', '').replace(/<@!?\d+>/, '').trim();
+
+      if (!targetMention || !text) {
+        return message.reply('❌ Format incorrect. Utilise : `!dmanonyme @Membre Ton message ici`');
+      }
+
+      try {
+        const anonEmbed = new EmbedBuilder()
+          .setColor('#9B59B6')
+          .setTitle('📩 Message Anonyme Reçu')
+          .setDescription(`> ${text}`)
+          .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
+        await targetMention.send({ embeds: [anonEmbed] });
+        return message.reply('✅ Message anonyme envoyé avec succès !');
+      } catch (e) {
+        return message.reply('❌ Impossible d’envoyer le message à cette personne.');
+      }
+    }
+
+    // 3. Commandes !vp ou !vocal en DM
+    if (content === '!vp' || content === '!vocal') {
+      // Vérifier si l'utilisateur est dans un serveur commun
+      const mutualGuild = client.guilds.cache.find(g => g.members.cache.has(userId));
+      if (!mutualGuild) {
+        return message.reply('❌ Tu n’es dans aucun serveur avec ce bot.');
+      }
+
+      const voiceChannels = mutualGuild.channels.cache.filter(c => c.type === 2); // 2 = GuildVoice
+      if (voiceChannels.size === 0) {
+        return message.reply('❌ Aucun salon vocal trouvé sur le serveur.');
+      }
+
+      // Création des boutons pour chaque salon vocal
+      const row = new ActionRowBuilder();
+      let count = 1;
+      let descriptionList = [];
+
+      for (const [chanId, chan] of voiceChannels.entries()) {
+        if (count <= 5) { // Limite Discord de 5 boutons par ligne
+          row.addComponents(
+            new ButtonBuilder()
+              .setCustomId(`select_vc_${chanId}`)
+              .setLabel(`Salon ${count}`)
+              .setStyle(ButtonStyle.Primary)
+          );
+        }
+        descriptionList.push(`**Salon ${count}** : ${chan.name}`);
+        count++;
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor('#3498DB')
+        .setTitle('🎙️ Sélection du Salon Vocal')
+        .setDescription('Voici la liste des salons vocaux disponibles sur le serveur. Clique sur le bouton correspondant pour le sécuriser :\n\n' + descriptionList.join('\n'))
+        .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
+
+      return message.reply({ embeds: [embed], components: [row] });
+    }
+
+    return;
+  }
+
+  // --- GESTION DE L'XP SUR LE SERVEUR ---
   const userId = message.author.id;
   const guildId = message.guild.id;
 
@@ -195,138 +295,77 @@ client.on('messageCreate', async message => {
   }
 });
 
-// --- PROTECTION VOCALE (/vp) ---
+// --- PROTECTION VOCALE ET GESTION DES SANCTIONS ---
 client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!newState.channelId) return;
   const channelId = newState.channelId;
   
-  // Vérifier si ce salon est verrouillé par un utilisateur
-  // (On peut stocker les salons verrouillés en mémoire)
-  if (global.lockedVoiceChannels && global.lockedVoiceChannels.has(channelId)) {
+  if (lockedVoiceChannels.has(channelId)) {
+    const data = lockedVoiceChannels.get(channelId);
     const member = newState.member;
-    const ownerId = global.lockedVoiceChannels.get(channelId);
-    if (member.id !== ownerId) {
+
+    if (member.id !== data.ownerId) {
       try {
         await member.voice.disconnect();
-        // Optionnel : Exclusion 1 minute du serveur ou simple déconnexion vocale
-        await member.timeout(60 * 1000, 'Tentative d’intrusion dans un salon vocal privé').catch(() => {});
+        if (data.sanction) {
+          await member.timeout(60 * 1000, 'Tentative d’intrusion dans un salon vocal sécurisé').catch(() => {});
+        }
       } catch (e) {}
     }
   }
 });
 
-// --- GESTION DES COMMANDES SLASH (ET EN MP) ---
+// --- GESTION DES INTERFACES ET BOUTONS EN DM ---
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-  const { commandName } = interaction;
-  const isDM = !interaction.guild;
-  const userId = interaction.user.id;
+  // Gestion des boutons de sélection de salon vocal en DM
+  if (interaction.isButton() && !interaction.guild) {
+    const userId = interaction.user.id;
 
-  // --- COMMANDES EN MESSAGE PRIVÉ (DM) ---
-  if (isDM) {
-    if (commandName === 'code') {
-      const secret = interaction.options.getString('secret');
-      if (secret !== '2252') {
-        return interaction.reply({ content: '❌ Code incorrect. Réessaie !', ephemeral: true });
-      }
+    if (interaction.customId.startsWith('select_vc_')) {
+      const salonId = interaction.customId.replace('select_vc_', '');
+      pendingVoiceSetup.set(userId, salonId);
 
-      // Vérifier si le code a déjà été utilisé par cet utilisateur
-      let redeemed = await db.get(`SELECT * FROM redeemed_codes WHERE userId = ?`, [userId]);
-      if (redeemed) {
-        return interaction.reply({ content: '❌ Tu as déjà validé ce code ! Impossible de le refaire.', ephemeral: true });
-      }
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('vc_nosanction').setLabel('Sans sanction').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('vc_sanction').setLabel('Avec sanction (1 min)').setStyle(ButtonStyle.Danger)
+      );
 
-      // Vérifier le niveau sur le premier serveur commun
-      const mutualGuild = client.guilds.cache.find(g => g.members.cache.has(userId));
-      if (!mutualGuild) {
-        return interaction.reply({ content: '❌ Erreur : Aucun serveur commun trouvé avec le bot.', ephemeral: true });
-      }
+      const embed = new EmbedBuilder()
+        .setColor('#E74C3C')
+        .setTitle('🛡️ Option de Sécurité Vocale')
+        .setDescription('Choisis l’option de sanction pour les personnes qui essayeront de rejoindre ton salon vocal privé :')
+        .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
-      let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, mutualGuild.id]);
-      const currentLevel = user ? user.level : 0;
-
-      if (currentLevel < 120) {
-        return interaction.reply({ content: `❌ Condition non remplie ! Tu es actuellement **niveau ${currentLevel}**. Il te faut être minimum **niveau 120** pour valider ce code. Va farmer !`, ephemeral: true });
-      }
-
-      // Attribuer le rôle "Béni par le bot" (tout vert)
-      const member = await mutualGuild.members.fetch(userId).catch(() => null);
-      if (member) {
-        let role = mutualGuild.roles.cache.find(r => r.name === 'Béni par le bot');
-        if (!role) {
-          try {
-            role = await mutualGuild.roles.create({ name: 'Béni par le bot', color: '#00FF00', reason: 'Code secret 2252 validé' });
-          } catch (e) {}
-        }
-        if (role) await member.roles.add(role).catch(() => {});
-      }
-
-      await db.run(`INSERT INTO redeemed_codes (userId) VALUES (?)`, [userId]);
-      return interaction.reply({ content: '✅ **Félicitations !** Code validé avec succès. Tu as reçu le rôle **"Béni par le bot"** et tu débloques les commandes exclusives en MP !', ephemeral: true });
+      return interaction.update({ embeds: [embed], components: [row] });
     }
 
-    // Vérification que l'utilisateur a bien le rôle ou le niveau pour les commandes avancées en DM
-    let redeemed = await db.get(`SELECT * FROM redeemed_codes WHERE userId = ?`, [userId]);
-    if (!redeemed && ['dmanonyme', 'spamdm', 'vp'].includes(commandName)) {
-      return interaction.reply({ content: '❌ Tu dois d’abord valider le code secret avec `/code [code]` en étant niveau 120 pour utiliser cette commande.', ephemeral: true });
-    }
-
-    if (commandName === 'dmanonyme') {
-      const targetUser = interaction.options.getUser('membre');
-      const text = interaction.options.getString('message');
-      try {
-        await targetUser.send(`📩 **Message Anonyme** :\n> ${text}`);
-        await interaction.reply({ content: '✅ Message anonyme envoyé avec succès !', ephemeral: true });
-      } catch (e) {
-        await interaction.reply({ content: '❌ Impossible d’envoyer un message privé à cette personne.', ephemeral: true });
-      }
-    }
-
-    else if (commandName === 'spamdm') {
-      const targetUser = interaction.options.getUser('membre');
-      const count = interaction.options.getInteger('nombre');
-      const seconds = interaction.options.getInteger('secondes');
-      const text = interaction.options.getString('message');
-
-      if (count > 20 || seconds < 2) {
-        return interaction.reply({ content: '❌ Sécurité anti-rate-limit : Maximum 20 messages et minimum 2 secondes d’intervalle.', ephemeral: true });
+    if (interaction.customId === 'vc_nosanction' || interaction.customId === 'vc_sanction') {
+      const salonId = pendingVoiceSetup.get(userId);
+      if (!salonId) {
+        return interaction.update({ content: '❌ Session expirée. Recommence avec `!vp` en DM.', embeds: [], components: [] });
       }
 
-      await interaction.reply({ content: `🚀 Envoi de ${count} messages toutes les ${seconds} secondes (Anti-rate-limit actif)...`, ephemeral: true });
+      const hasSanction = interaction.customId === 'vc_sanction';
+      lockedVoiceChannels.set(salonId, { ownerId: userId, sanction: hasSanction });
+      pendingVoiceSetup.delete(userId);
 
-      let sent = 0;
-      const interval = setInterval(async () => {
-        if (sent >= count) {
-          clearInterval(interval);
-          return;
-        }
-        try {
-          await targetUser.send(`💬 ${text}`);
-          sent++;
-        } catch (e) {
-          clearInterval(interval);
-        }
-      }, seconds * 1000);
-    }
-
-    else if (commandName === 'vp') {
-      const salonId = interaction.options.getString('idsalon');
       const mutualGuild = client.guilds.cache.find(g => g.channels.cache.has(salonId));
-      if (!mutualGuild) {
-        return interaction.reply({ content: '❌ Salon vocal introuvable sur tes serveurs.', ephemeral: true });
-      }
+      const channel = mutualGuild ? mutualGuild.channels.cache.get(salonId) : null;
 
-      if (!global.lockedVoiceChannels) global.lockedVoiceChannels = new Map();
-      global.lockedVoiceChannels.set(salonId, userId);
+      const successEmbed = new EmbedBuilder()
+        .setColor('#2ECC71')
+        .setTitle('🔒 Salon Vocal Sécurisé')
+        .setDescription(`Ton salon **${channel ? channel.name : salonId}** est désormais privé !\nOption choisie : **${hasSanction ? 'Avec sanction (1 min d’exclusion)' : 'Sans sanction (Simple déconnexion)'}**`)
+        .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
-      await interaction.reply({ content: `✅ Le salon vocal <#${salonId}> est désormais **privé** ! Toute personne qui essaiera de le rejoindre sera immédiatement déconnectée et exclue 1 minute.`, ephemeral: true });
+      return interaction.update({ embeds: [successEmbed], components: [] });
     }
-
-    return;
   }
 
-  // --- COMMANDES SUR LE SERVEUR ---
-  const guildId = interaction.guild.id;
+  // --- GESTION DES COMMANDES SLASH SUR LE SERVEUR ---
+  if (!interaction.isChatInputCommand()) return;
+  const guildId = interaction.guild ? interaction.guild.id : null;
+  const userId = interaction.user.id;
 
   // Sécurité Admin stricte
   const adminCommands = ['setsalon', 'addxp', 'setlevel', 'resetlevel'];
@@ -337,6 +376,8 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({ content: '❌ **Accès refusé !** Commande réservée aux administrateurs (Exclusion 1 minute).', ephemeral: true });
     }
   }
+
+  const { commandName } = interaction;
 
   if (commandName === 'rank') {
     let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, guildId]);
@@ -437,4 +478,3 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
-      
