@@ -1,5 +1,5 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, ActionRowBuilder, StringSelectMenuBuilder } = require('discord.js');
-const sqlite3 = require('sqlite3').verbose();
+const sqlite3 = require('sqlite3().verbose');
 const { open } = require('sqlite');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates] });
@@ -33,13 +33,19 @@ async function applyLevelRoles(member, lvl) {
 
 async function addXpFromMessage(member, guildId, add, defChan) {
   let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [member.id, guildId]) || { xp: 0, level: 0 };
+  
+  // Plafond de sécurité anti-bug si le niveau est corrompu ou trop élevé
+  if (u.level > 200) u.level = 200;
+
   let xp = u.xp + add, lvl = u.level, need = 100 + (lvl * 25);
   let cfg = await db.get(`SELECT chanId FROM config WHERE guildId = ?`, [guildId]);
   let chan = cfg ? member.guild.channels.cache.get(cfg.chanId) || defChan : defChan;
 
   let loops = 0;
-  while (xp >= need && loops < 10) { // Sécurité stricte anti-freeze (max 10 niveaux par message)
-    xp -= need; lvl++; loops++; need = 100 + (lvl * 25);
+  while (xp >= need && loops < 5) {
+    xp -= need; lvl++; loops++; 
+    if (lvl > 200) lvl = 200; // Bloque le niveau max à 200 pour éviter l'explosion
+    need = 100 + (lvl * 25);
     await applyLevelRoles(member, lvl);
     if (chan) {
       chan.send({ embeds: [new EmbedBuilder().setColor('#00FFCC').setTitle('🎉 NOUVEAU NIVEAU !').setDescription(`Félicitations <@${member.id}>, tu passes au **niveau ${lvl}** ! 🚀`).setFooter({ text: CREATOR })] }).catch(() => {});
@@ -53,7 +59,7 @@ const cmds = [
   new SlashCommandBuilder().setName('leaderboard').setDescription('Classement du serveur'),
   new SlashCommandBuilder().setName('setsalon').setDescription('Salon des niveaux (Admin)').addChannelOption(o => o.setName('salon').setDescription('Salon').setRequired(true)),
   new SlashCommandBuilder().setName('addxp').setDescription('Ajouter de l’XP (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('montant').setDescription('XP').setRequired(true)),
-  new SlashCommandBuilder().setName('setlevel').setDescription('Modifier le niveau (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('niveau').setDescription('Niveau').setRequired(true)),
+  new SlashCommandBuilder().setName('setlevel').setDescription('Modifier le niveau (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('niveau').setDescription('Niveau (Max 200)').setRequired(true)),
   new SlashCommandBuilder().setName('resetlevel').setDescription('Réinitialiser (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
   new SlashCommandBuilder().setName('less').setDescription('Renommer un membre (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addStringOption(o => o.setName('nouveau_nom').setDescription('Nouveau pseudo').setRequired(true)),
   new SlashCommandBuilder().setName('menu').setDescription('Centre de contrôle').addSubcommand(s => s.setName('vocal').setDescription('Sécurité vocale (Niveau 100+)'))
@@ -61,7 +67,7 @@ const cmds = [
 
 client.once('ready', async () => {
   await initDB();
-  console.log(`🤖 Bot connecté : ${client.user.tag}`);
+  console.log(`🤖 Bot connecté et sécurisé : ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   await rest.put(Routes.applicationCommands(client.user.id), { body: cmds });
   client.user.setPresence({ activities: [{ name: '/menu vocal | 🛡️' }], status: 'online' });
@@ -114,7 +120,7 @@ client.on('interactionCreate', async i => {
         return i.reply({ embeds: [new EmbedBuilder().setColor('#3498db').setTitle('🛡️ Centre Vocal').setDescription('Sélectionne une option :')], components: [row], ephemeral: true });
       }
 
-      // Sécurité Admin avec Timeout garanti
+      // Sécurité Admin stricte
       if (['setsalon', 'addxp', 'setlevel', 'resetlevel', 'less'].includes(commandName)) {
         let isAdmin = i.member.permissions.has(PermissionFlagsBits.Administrator) || uId === i.guild.ownerId;
         if (!isAdmin) {
@@ -131,6 +137,7 @@ client.on('interactionCreate', async i => {
 
       if (commandName === 'rank') {
         let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [uId, gId]) || { xp: 0, level: 0 };
+        if (u.level > 200) u.level = 200;
         let need = 100 + (u.level * 25), pct = Math.min(Math.floor((u.xp / need) * 100), 100);
         let bar = '█'.repeat(Math.floor(pct / 10)) + '░'.repeat(10 - Math.floor(pct / 10));
         return i.reply({ embeds: [new EmbedBuilder().setColor('#5865F2').setTitle(`🌟 Profil de ${i.user.username}`).setThumbnail(i.user.displayAvatarURL()).addFields({ name: 'Niveau', value: `\`${u.level}\``, inline: true }, { name: 'XP', value: `\`${u.xp} / ${need}\``, inline: true }, { name: 'Progression', value: `\`${bar}\` **${pct}%**`, inline: false }).setFooter({ text: CREATOR })] });
@@ -154,7 +161,11 @@ client.on('interactionCreate', async i => {
         let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [target.id, gId]) || { xp: 0, level: 0 };
         let xp = u.xp + amt, lvl = u.level, need = 100 + (lvl * 25);
         let loops = 0;
-        while (xp >= need && loops < 50) { xp -= need; lvl++; loops++; need = 100 + (lvl * 25); }
+        while (xp >= need && loops < 20) { 
+          xp -= need; lvl++; loops++; 
+          if (lvl > 200) lvl = 200;
+          need = 100 + (lvl * 25); 
+        }
         await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [target.id, gId, xp, lvl]);
         await applyLevelRoles(mem, lvl);
         return i.reply({ content: `✅ Ajout de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}).`, ephemeral: true });
@@ -162,6 +173,7 @@ client.on('interactionCreate', async i => {
 
       if (commandName === 'setlevel') {
         let target = options.getUser('membre'), lvl = options.getInteger('niveau');
+        if (lvl > 200) lvl = 200; // Plafond maximal de sécurité
         let mem = await i.guild.members.fetch(target.id);
         await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, ?)`, [target.id, gId, lvl]);
         await applyLevelRoles(mem, lvl);
@@ -173,7 +185,7 @@ client.on('interactionCreate', async i => {
         let mem = await i.guild.members.fetch(target.id);
         await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)`, [target.id, gId]);
         await applyLevelRoles(mem, 0);
-        return i.reply({ content: `✅ Progression de <@${target.id}> réinitialisée.`, ephemeral: true });
+        return i.reply({ content: `✅ Progression de <@${target.id}> réinitialisée à 0.`, ephemeral: true });
       }
 
       if (commandName === 'less') {
@@ -225,8 +237,19 @@ client.on('interactionCreate', async i => {
       }
     }
   } catch (err) {
-    console.error("Erreur interaction :", err);
+    console.error("Erreur critique d'interaction :", err);
+    if (i.isRepliable() && !i.replied && !i.deferred) {
+      await i.reply({ content: "Une erreur est survenue.", ephemeral: true }).catch(() => {});
+    }
   }
+});
+
+// Sécurité anti-crash globale de Node.js pour forcer le bot à rester en vie sur Render
+process.on('unhandledRejection', error => {
+  console.error('Erreur non gérée :', error);
+});
+process.on('uncaughtException', error => {
+  console.error('Exception non interceptée :', error);
 });
 
 client.login(process.env.DISCORD_TOKEN);
