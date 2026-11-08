@@ -1,7 +1,15 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, ChannelType, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder } = require('discord.js');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
+const express = require('express'); // Nécessaire pour garder le bot éveillé sur Render
 
+// --- SERVEUR HTTP POUR ÉVITER LA MISE EN VEILLE SUR RENDER ---
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get('/', (req, res) => res.send('Bot bankiozi est en ligne et actif ! 🚀'));
+app.listen(PORT, () => console.log(`🌍 Serveur web anti-sleep démarré sur le port ${PORT}`));
+
+// --- CONFIGURATION DU BOT DISCORD ---
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -75,10 +83,17 @@ const commands = [
 
 client.once('ready', async () => {
   await initDB();
-  console.log(`Bot connecté avec succès : ${client.user.tag}`);
+  console.log(`🤖 Bot connecté avec succès : ${client.user.tag}`);
+  
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try { await rest.put(Routes.applicationCommands(client.user.id), { body: commands }); } catch (e) {}
   client.user.setPresence({ activities: [{ name: '/menu vocal | Sécurité 🛡️', type: 0 }], status: 'online' });
+
+  // --- TÂCHE AUTOMATIQUE TOUTES LES 5 MINUTES (Exemple de vérification en arrière-plan) ---
+  setInterval(async () => {
+    console.log("🔄 [Tâche automatique] Vérification périodique des salons vocaux et des sécurités en cours...");
+    // Tu peux placer ici des vérifications automatiques si nécessaire (ex: nettoyage de la base de données)
+  }, 5 * 60 * 1000); // 5 minutes en millisecondes
 });
 
 // --- GESTION DES MESSAGES (XP) ---
@@ -108,18 +123,20 @@ client.on('messageCreate', async message => {
   }
 });
 
-// --- SURVEILLANCE VOCALE ET SANCTIONS ---
+// --- SURVEILLANCE VOCALE ET SANCTIONS AUTOMATIQUES ---
 client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!newState.channelId || newState.member.user.bot) return;
   const channelId = newState.channelId;
   const member = newState.member;
 
+  // Vérification automatique de la Blacklist
   const blacklisted = await db.get(`SELECT * FROM blacklisted_members WHERE channelId = ? AND userId = ?`, [channelId, member.id]);
   if (blacklisted) {
     try { await member.voice.disconnect("Tu es blacklisté de ce salon vocal"); } catch (e) {}
     return;
   }
 
+  // Vérification automatique du Verrouillage / Whitelist
   const lock = await db.get(`SELECT * FROM locked_voices WHERE channelId = ?`, [channelId]);
   if (!lock) return;
 
@@ -135,7 +152,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   } catch (e) {}
 });
 
-// --- GESTION DES INTERACTIONS ---
+// --- GESTION DES INTERACTIONS ET COMMANDES ---
 client.on('interactionCreate', async interaction => {
   if (interaction.isChatInputCommand()) {
     const guildId = interaction.guild ? interaction.guild.id : null;
@@ -181,7 +198,6 @@ client.on('interactionCreate', async interaction => {
     if (adminCommands.includes(commandName)) {
       const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator) || interaction.user.id === interaction.guild.ownerId;
       if (!isAdmin) {
-        try { await interaction.member.timeout(60 * 1000, "Non autorisé"); } catch (e) {}
         return interaction.reply({ content: '❌ **Sécurité :** Accès refusé. Réservé aux administrateurs.', ephemeral: true });
       }
     }
@@ -319,7 +335,7 @@ client.on('interactionCreate', async interaction => {
       try {
         const targetMember = await interaction.guild.members.fetch(targetUserId);
         if (targetMember && targetMember.voice.channelId === memberVoice.id) {
-          await targetMember.voice.disconnect("Tu as été blacklisté de ce salon vocal");
+          await targetMember.voice.disconnect("Tu es blacklisté de ce salon vocal");
         }
       } catch (e) {}
 
@@ -334,18 +350,4 @@ client.on('interactionCreate', async interaction => {
 
       const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator) || interaction.user.id === interaction.guild.ownerId;
       if (lock.ownerId !== interaction.user.id && !isAdmin) {
-        return interaction.update({ content: `❌ **Sécurité :** Tu n'es pas le propriétaire de ce verrouillage et tu n'es pas admin.`, embeds: [], components: [] });
-      }
-
-      await db.run(`DELETE FROM locked_voices WHERE channelId = ?`, [channelIdToUnlock]);
-      await db.run(`DELETE FROM allowed_members WHERE channelId = ?`, [channelIdToUnlock]);
-      await db.run(`DELETE FROM blacklisted_members WHERE channelId = ?`, [channelIdToUnlock]);
-
-      const embed = new EmbedBuilder().setColor('#2ECC71').setTitle('🔓 Salon Public (VPU)').setDescription(`Le salon vocal a été rendu public avec succès.`);
-      return interaction.update({ embeds: [embed], components: [] });
-    }
-  }
-});
-
-client.login(process.env.DISCORD_TOKEN);
-                                   
+        return interaction.update({ content: `❌ **Sécurité :** Tu n'es pas le propriétaire et tu n'es pas admin.`, embeds: [], c
