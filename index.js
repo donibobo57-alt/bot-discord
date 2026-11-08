@@ -1,13 +1,6 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, ActionRowBuilder, StringSelectMenuBuilder } = require('discord.js');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
-const express = require('express');
-
-// Serveur web indispensable pour maintenir le bot éveillé sur Render
-const app = express();
-const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Bot bankiozi en ligne et opérationnel 🚀'));
-app.listen(PORT, () => console.log(`🌍 Serveur HTTP actif sur le port ${PORT}`));
 
 const client = new Client({
   intents: [
@@ -23,19 +16,15 @@ let db;
 const CREATOR_NAME = "bankiozi";
 
 async function initDB() {
-  try {
-    db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS users (userId TEXT, guildId TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 0, PRIMARY KEY (userId, guildId));
-      CREATE TABLE IF NOT EXISTS config (guildId TEXT PRIMARY KEY, notifChannelId TEXT);
-      CREATE TABLE IF NOT EXISTS locked_voices (channelId TEXT PRIMARY KEY, ownerId TEXT, sanctionType TEXT);
-      CREATE TABLE IF NOT EXISTS allowed_members (channelId TEXT, userId TEXT, PRIMARY KEY (channelId, userId));
-      CREATE TABLE IF NOT EXISTS blacklisted_members (channelId TEXT, userId TEXT, PRIMARY KEY (channelId, userId));
-    `);
-    console.log("📂 Base de données SQLite connectée avec succès !");
-  } catch (err) {
-    console.error("❌ Erreur critique lors de l'initialisation de la base de données :", err);
-  }
+  db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS users (userId TEXT, guildId TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 0, PRIMARY KEY (userId, guildId));
+    CREATE TABLE IF NOT EXISTS config (guildId TEXT PRIMARY KEY, notifChannelId TEXT);
+    CREATE TABLE IF NOT EXISTS locked_voices (channelId TEXT PRIMARY KEY, ownerId TEXT, sanctionType TEXT);
+    CREATE TABLE IF NOT EXISTS allowed_members (channelId TEXT, userId TEXT, PRIMARY KEY (channelId, userId));
+    CREATE TABLE IF NOT EXISTS blacklisted_members (channelId TEXT, userId TEXT, PRIMARY KEY (channelId, userId));
+  `);
+  console.log("📂 Base de données connectée avec succès !");
 }
 
 async function checkAndApplyLevelRoles(member, newLevel, channel) {
@@ -86,14 +75,14 @@ const commands = [
 
 client.once('ready', async () => {
   await initDB();
-  console.log(`🤖 Bot connecté et prêt : ${client.user.tag}`);
+  console.log(`🤖 Bot connecté : ${client.user.tag}`);
   
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try {
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log("🔄 Commandes Slash synchronisées avec succès !");
+    console.log("🔄 Commandes Slash enregistrées avec succès !");
   } catch (e) {
-    console.error("❌ Erreur lors de la synchronisation des commandes :", e);
+    console.error("❌ Erreur enregistrement commandes :", e);
   }
   
   client.user.setPresence({ activities: [{ name: '/menu vocal | Sécurité 🛡️', type: 0 }], status: 'online' });
@@ -153,16 +142,10 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   } catch (e) {}
 });
 
-// --- GESTION DES INTERACTIONS (COMMANDES & MENUS) ---
+// --- GESTION DES INTERACTIONS ---
 client.on('interactionCreate', async interaction => {
   try {
-    if (!db) {
-      if (interaction.isRepliable()) {
-        return await interaction.reply({ content: '❌ Erreur : Base de données en cours de chargement, réessaie dans un instant.', ephemeral: true });
-      }
-      return;
-    }
-
+    if (!db) return;
     const guildId = interaction.guild ? interaction.guild.id : null;
     const userId = interaction.user.id;
 
@@ -243,11 +226,7 @@ client.on('interactionCreate', async interaction => {
         const amount = options.getInteger('montant');
         let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [target.id, guildId]) || { xp: 0, level: 0 };
         let newXp = user.xp + amount, newLevel = user.level, xpNeeded = 100 + (newLevel * 25);
-        while (newXp >= xpNeeded) {
-          newXp -= xpNeeded;
-          newLevel += 1;
-          xpNeeded = 100 + (newLevel * 25);
-        }
+        while (newXp >= xpNeeded) { newXp -= xpNeeded; newLevel += 1; xpNeeded = 100 + (newLevel * 25); }
         await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [target.id, guildId, newXp, newLevel]);
         return await interaction.reply({ content: `✅ Ajout de **${amount} XP** à <@${target.id}> (Niveau : ${newLevel}).`, ephemeral: true });
       } else if (commandName === 'setlevel') {
@@ -365,4 +344,18 @@ client.on('interactionCreate', async interaction => {
           return await interaction.reply({ content: `❌ **Sécurité :** Tu n'es pas le propriétaire et tu n'es pas admin.`, ephemeral: true });
         }
 
-        await db.run(`DELETE FROM lo
+        await db.run(`DELETE FROM locked_voices WHERE channelId = ?`, [channelIdToUnlock]);
+        await db.run(`DELETE FROM allowed_members WHERE channelId = ?`, [channelIdToUnlock]);
+        await db.run(`DELETE FROM blacklisted_members WHERE channelId = ?`, [channelIdToUnlock]);
+
+        const embed = new EmbedBuilder().setColor('#2ECC71').setTitle('🔓 Salon Public (VPU)').setDescription(`Le salon vocal a été rendu public avec succès.`);
+        return await interaction.update({ embeds: [embed], components: [] });
+      }
+    }
+  } catch (err) {
+    console.error("❌ Erreur sur une interaction :", err);
+  }
+});
+
+client.login(process.env.DISCORD_TOKEN);
+            
