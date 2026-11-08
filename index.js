@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits } = require('discord.js');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 
@@ -13,7 +13,7 @@ const client = new Client({
 });
 
 let db;
-const CREATOR_NAME = "bankiozi"; // 👈 Ton pseudo mis à jour
+const CREATOR_NAME = "bankiozi"; // 👈 Ton vrai pseudo de créateur
 
 // --- INITIALISATION DE LA BASE DE DONNÉES ---
 async function initDB() {
@@ -45,22 +45,22 @@ async function initDB() {
   console.log("📂 Base de données RPG multi-serveurs connectée avec succès !");
 }
 
-// --- CATALOGUE DES OBJETS & RELIQUES ---
+// --- CATALOGUE DES OBJETS & RELIQUES (Boutique & Raretés) ---
 const SHOP_ITEMS = [
-  { label: 'Potion de Soin', value: 'potion_soin', price: 30, rarity: 'Commun', type: 'item', description: 'Rétablit un peu d’énergie.' },
-  { label: 'Badge Bronze', value: 'badge_bronze', price: 100, rarity: 'Commun', type: 'accessoire', description: 'Un badge basique pour débuter.' },
-  { label: 'Épée en Fer', value: 'epee_fer', price: 450, rarity: 'Peu Commun', type: 'equipement', description: 'Augmente légèrement la force.' },
-  { label: 'Couleur Néon Profil', value: 'color_neon', price: 1500, rarity: 'Rare', type: 'accessoire', description: 'Illumine ton profil en style futuriste.' },
-  { label: 'Relique Celeste', value: 'relique_celeste', price: 8000, rarity: 'Épique', type: 'relique', description: 'Une relique ancienne pleine de mystères.' },
-  { label: 'Aura du Dragon', value: 'aura_dragon', price: 25000, rarity: 'Légendaire (Rare - Mensuel)', type: 'equipement', description: 'Objet ultra rare disponible uniquement ce mois-ci.' }
+  { label: 'Potion de Soin', value: 'potion_soin', price: 30, rarity: 'Commun', description: 'Rétablit un peu d’énergie.' },
+  { label: 'Badge Bronze', value: 'badge_bronze', price: 100, rarity: 'Commun', description: 'Un badge basique pour débuter.' },
+  { label: 'Épée en Fer', value: 'epee_fer', price: 450, rarity: 'Peu Commun', description: 'Augmente légèrement la force.' },
+  { label: 'Couleur Néon Profil', value: 'color_neon', price: 1500, rarity: 'Rare', description: 'Illumine ton profil en style futuriste.' },
+  { label: 'Relique Celeste', value: 'relique_celeste', price: 8000, rarity: 'Épique', description: 'Une relique ancienne pleine de mystères.' },
+  { label: 'Aura du Dragon', value: 'aura_dragon', price: 25000, rarity: 'Légendaire (Mensuel)', description: 'Objet ultra rare disponible uniquement en fin de mois.' }
 ];
 
-// --- LISTE DES COMMANDES SLASH (Une dizaine de commandes) ---
+// --- COMMANDES SLASH ---
 const commands = [
   new SlashCommandBuilder().setName('help').setDescription('Affiche la liste complète des commandes du bot RPG'),
   new SlashCommandBuilder().setName('rank').setDescription('Affiche ton profil complet, niveau, XP et pièces'),
   new SlashCommandBuilder().setName('leaderboard').setDescription('Affiche le classement des meilleurs joueurs'),
-  new SlashCommandBuilder().setName('shop').setDescription('Ouvre la boutique du serveur avec les raretés et objets'),
+  new SlashCommandBuilder().setName('shop').setDescription('Ouvre la boutique du serveur avec les proportions et raretés'),
   new SlashCommandBuilder().setName('inventaire').setDescription('Affiche tes objets, équipements et reliques possédés'),
   new SlashCommandBuilder().setName('chasser').setDescription('Combattre un monstre sauvage pour gagner XP, pièces et reliques'),
   new SlashCommandBuilder().setName('trade').setDescription('Proposer un échange d’objets/reliques à un joueur en MP')
@@ -117,7 +117,6 @@ client.on('messageCreate', async message => {
     let newLevel = user.level;
     let newCoins = user.coins + coinsToAdd;
 
-    // Calcul de niveau en cascade (ex: 100 XP requis pour niv 1, 200 pour niv 2, etc.)
     let xpNeeded = (newLevel + 1) * 100;
     while (newXp >= xpNeeded) {
       newXp -= xpNeeded;
@@ -136,7 +135,7 @@ client.on('messageCreate', async message => {
   }
 });
 
-// --- GESTION DES INTERACTIONS (COMMANDES, BOUTONS, MENUS) ---
+// --- GESTION DES INTERACTIONS ---
 client.on('interactionCreate', async interaction => {
   const guildId = interaction.guild.id;
   const userId = interaction.user.id;
@@ -148,7 +147,7 @@ client.on('interactionCreate', async interaction => {
       const embed = new EmbedBuilder()
         .setColor('#3498DB')
         .setTitle(`📜 Guide & Commandes du Bot RPG`)
-        .setDescription(`Voici la liste complète des commandes pour profiter de l'aventure :`)
+        .setDescription(`Voici la liste complète des commandes de ton aventure :`)
         .addFields(
           { name: '/rank', value: 'Affiche ta carte de profil, niveau et pièces.' },
           { name: '/leaderboard', value: 'Classement des meilleurs joueurs du serveur.' },
@@ -214,7 +213,7 @@ client.on('interactionCreate', async interaction => {
       const embed = new EmbedBuilder()
         .setColor('#FFD700')
         .setTitle(`🛍️ Boutique & Raretés du Serveur`)
-        .setDescription(`Tes pièces : **${userCoins} 🪙**\n\n*Proportions d'apparition : Les objets légendaires et auras rares n'apparaissent qu'à la fin du mois dans cette boutique !*\nSélectionne un objet ci-dessous :`)
+        .setDescription(`Tes pièces : **${userCoins} 🪙**\n\n*Proportions d'apparition : Les objets rares et légendaires n'apparaissent qu'à la fin du mois.*`)
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
       await interaction.reply({ embeds: [embed], components: [row] });
@@ -234,7 +233,6 @@ client.on('interactionCreate', async interaction => {
     }
 
     else if (commandName === 'chasser') {
-      // Simulation de combat contre un mob
       const earnedXp = Math.floor(Math.random() * 40) + 20;
       const earnedCoins = Math.floor(Math.random() * 20) + 10;
       const foundRelic = Math.random() < 0.3 ? "Relique Ancienne" : null;
@@ -264,7 +262,7 @@ client.on('interactionCreate', async interaction => {
       const embed = new EmbedBuilder()
         .setColor('#E67E22')
         .setTitle(`⚔️ Combat contre un Monstre !`)
-        .setDescription(`Tu as vaillamment combattu et remporté :\n✨ **+${earnedXp} XP**\n🪙 **+${earnedCoins} Pièces**\n${foundRelic ? `🎁 **Objet trouvé : ${foundRelic} !**` : 'Aucune relique trouvée cette fois.'}`)
+        .setDescription(`Victoire ! Tu gagnes :\n✨ **+${earnedXp} XP**\n🪙 **+${earnedCoins} Pièces**\n${foundRelic ? `🎁 **Objet trouvé : ${foundRelic} !**` : 'Aucune relique trouvée.'}`)
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
       await interaction.reply({ embeds: [embed] });
@@ -273,17 +271,16 @@ client.on('interactionCreate', async interaction => {
     else if (commandName === 'fusion') {
       const relics = await db.all(`SELECT * FROM inventory WHERE userId = ? AND guildId = ? AND item LIKE '%Relique%'`, [userId, guildId]);
       if (relics.length < 2) {
-        return interaction.reply({ content: `❌ Il te faut au moins **2 reliques** dans ton inventaire pour tenter une fusion !`, ephemeral: true });
+        return interaction.reply({ content: `❌ Il te faut au moins **2 reliques** dans ton inventaire pour fusionner !`, ephemeral: true });
       }
 
-      // Supprime 2 reliques et donne un objet supérieur
       await db.run(`DELETE FROM inventory WHERE userId = ? AND guildId = ? AND item LIKE '%Relique%' LIMIT 2`, [userId, guildId]);
       await db.run(`INSERT INTO inventory (userId, guildId, item) VALUES (?, ?, ?)`, [userId, guildId, 'Cristal Divin Fusionné']);
 
       const embed = new EmbedBuilder()
         .setColor('#F1C40F')
         .setTitle(`✨ Fusion Réussie !`)
-        .setDescription(`Tes reliques ont fusionné pour créer un **Cristal Divin Fusionné** exceptionnel !`)
+        .setDescription(`Tes reliques ont fusionné pour créer un **Cristal Divin Fusionné** !`)
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
       await interaction.reply({ embeds: [embed] });
@@ -292,7 +289,7 @@ client.on('interactionCreate', async interaction => {
     else if (commandName === 'trade') {
       const target = interaction.options.getUser('membre');
       if (target.bot || target.id === userId) {
-        return interaction.reply({ content: `❌ Tu ne peux pas échanger avec un bot ou toi-même.`, ephemeral: true });
+        return interaction.reply({ content: `❌ Impossible d'échanger avec un bot ou toi-même.`, ephemeral: true });
       }
 
       const row = new ActionRowBuilder().addComponents(
@@ -303,12 +300,12 @@ client.on('interactionCreate', async interaction => {
       const embed = new EmbedBuilder()
         .setColor('#9B59B6')
         .setTitle(`🤝 Demande d'Échange`)
-        .setDescription(`<@${userId}> souhaite faire un échange d'objets avec toi !\nAppuie sur **Accepter** pour ouvrir le salon sécurisé en MP.`)
+        .setDescription(`<@${userId}> souhaite faire un échange avec toi !`)
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
       try {
         await target.send({ embeds: [embed], components: [row] });
-        await interaction.reply({ content: `✅ Une demande d'échange a été envoyée en message privé à ${target.username} !`, ephemeral: true });
+        await interaction.reply({ content: `✅ Demande d'échange envoyée en MP à ${target.username} !`, ephemeral: true });
       } catch (e) {
         await interaction.reply({ content: `❌ Impossible d'envoyer un message privé à ce membre.`, ephemeral: true });
       }
@@ -330,7 +327,6 @@ client.on('interactionCreate', async interaction => {
         let newLevel = user.level;
         let xpNeeded = (newLevel + 1) * 100;
         
-        // Cascade complète d'XP pour gros montants (ex: 9000 XP)
         while (newXp >= xpNeeded) {
           newXp -= xpNeeded;
           newLevel += 1;
@@ -342,8 +338,8 @@ client.on('interactionCreate', async interaction => {
 
       const embed = new EmbedBuilder()
         .setColor('#2ECC71')
-        .setTitle(`⚡ Administration XP Cascade`)
-        .setDescription(`Ajout de **${amount} XP** à ${target.username} avec succès ! (Nouveau niveau calculé avec précision).`)
+        .setTitle(`⚡ Administration XP`)
+        .setDescription(`Ajout de **${amount} XP** à ${target.username} (Cascade de niveaux calculée avec succès).`)
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
       await interaction.reply({ embeds: [embed] });
@@ -365,7 +361,7 @@ client.on('interactionCreate', async interaction => {
         if (type === 'boss') await db.run(`UPDATE config SET bossChannelId = ? WHERE guildId = ?`, [channel.id, guildId]);
       }
 
-      await interaction.reply({ content: `✅ Salon des **${type}s** défini avec succès sur <#${channel.id}> !`, ephemeral: true });
+      await interaction.reply({ content: `✅ Salon des **${type}s** défini sur <#${channel.id}> !`, ephemeral: true });
     }
 
     else if (commandName === 'boss') {
@@ -380,8 +376,8 @@ client.on('interactionCreate', async interaction => {
 
       const embed = new EmbedBuilder()
         .setColor('#E74C3C')
-        .setTitle(`🐉 Un Boss Mondial terrifiant apparaît !`)
-        .setDescription(`Points de vie : **${bossHp} / 200**\nSpammez le bouton pour l'éliminer tous ensemble !`)
+        .setTitle(`🐉 Un Boss Mondial apparaît !`)
+        .setDescription(`Points de vie : **${bossHp} / 200**\nSpammez le bouton pour l'éliminer !`)
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
       const msg = await interaction.reply({ embeds: [embed], components: [row], fetchReply: true });
@@ -392,13 +388,12 @@ client.on('interactionCreate', async interaction => {
         bossHp -= 15;
         lastAttacker = i.user.username;
         if (bossHp <= 0) bossHp = 0;
-
         if (bossHp === 0) collector.stop();
 
         const updatedEmbed = new EmbedBuilder()
           .setColor('#E74C3C')
           .setTitle(`🐉 Combat contre le Boss Mondial`)
-          .setDescription(bossHp > 0 ? `Points de vie du Boss : **${bossHp} / 200**` : `🏆 Boss vaincu de haute lutte par **${lastAttacker}** !\nCréateurs du projet : **${CREATOR_NAME}** & équipe.`)
+          .setDescription(bossHp > 0 ? `Points de vie du Boss : **${bossHp} / 200**` : `🏆 Boss vaincu par **${lastAttacker}** !\nDéveloppé par le créateur **${CREATOR_NAME}**.`)
           .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
         await i.update({ embeds: [updatedEmbed], components: bossHp > 0 ? [row] : [] });
@@ -409,7 +404,7 @@ client.on('interactionCreate', async interaction => {
           const timeoutEmbed = new EmbedBuilder()
             .setColor('#95A5A6')
             .setTitle(`⏱️ Temps écoulé !`)
-            .setDescription(`Le boss est parvenu à s'enfuir dans l'obscurité...`)
+            .setDescription(`Le boss s'est enfui...`)
             .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
           await msg.edit({ embeds: [timeoutEmbed], components: [] });
         }
@@ -417,5 +412,17 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // Achat boutique via menu déroulant
- 
+  if (interaction.isStringSelectMenu() && interaction.customId === 'shop_select') {
+    const selectedItemValue = interaction.values[0];
+    const item = SHOP_ITEMS.find(i => i.value === selectedItemValue);
+
+    let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, guildId]);
+    let userCoins = user ? user.coins : 0;
+
+    if (!user || userCoins < item.price) {
+      return interaction.reply({ content: `❌ Pas assez de pièces pour acheter **${item.label}** (${item.price} 🪙).`, ephemeral: true });
+    }
+
+    await db.run(`UPDATE users SET coins = coins - ? WHERE userId = ? AND guildId = ?`, [item.price, userId, guildId]);
+    await db.run(`INSERT INTO inventory (userId, guildId, item) VALUES (?, ?, ?)`, [userId, guildId, item.label]);
+    
