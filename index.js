@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, ChannelType } = require('discord.js');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 
@@ -15,8 +15,7 @@ const client = new Client({
 let db;
 const CREATOR_NAME = "bankiozi";
 
-// Stockage temporaire pour l'étape de configuration du rôle personnalisé
-const vpSetupState = new Map(); // userId -> { step, guildId, roleName, roleColor, channelId, createdRoleId }
+const roleSetupState = new Map(); // userId -> channelId pour le panel de niveau 120
 
 async function initDB() {
   db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
@@ -24,6 +23,8 @@ async function initDB() {
     CREATE TABLE IF NOT EXISTS users (userId TEXT, guildId TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 0, PRIMARY KEY (userId, guildId));
     CREATE TABLE IF NOT EXISTS config (guildId TEXT PRIMARY KEY, notifChannelId TEXT);
     CREATE TABLE IF NOT EXISTS custom_roles (userId TEXT PRIMARY KEY, roleId TEXT, deleted INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS locked_voices (channelId TEXT PRIMARY KEY, ownerId TEXT, sanctionType TEXT);
+    CREATE TABLE IF NOT EXISTS allowed_members (channelId TEXT, userId TEXT, PRIMARY KEY (channelId, userId));
   `);
   console.log("📂 Base de données connectée !");
 }
@@ -54,16 +55,38 @@ async function checkAndApplyLevelRoles(member, newLevel, channel) {
   if (channel) {
     channel.send({ embeds: [new EmbedBuilder().setColor('#00FFCC').setTitle('🎉 Montée de Niveau !').setDescription(`Félicitations <@${member.id}>, tu passes au **niveau ${newLevel}** ! 🚀`).setFooter({ text: `Créateur : ${CREATOR_NAME}` })] }).catch(() => {});
   }
+
+  // Création automatique du salon de configuration pour le rôle unique au niveau 120
+  if (newLevel === 120) {
+    try {
+      const guild = member.guild;
+      const privateChan = await guild.channels.create({
+        name: `role-${member.user.username}`,
+        type: ChannelType.GuildText,
+        permissionOverwrites: [
+          { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+          { id: member.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+          { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
+        ]
+      });
+
+      roleSetupState.set(member.id, privateChan.id);
+      await privateChan.send(`👋 Bonjour <@${member.id}> !\n\nTu as atteint le **niveau 120** ! Écris dans ce salon les informations de ton rôle sous ce format :\n\`Pseudo | Couleur (#HEX) | M ou D ou MC ou A\`\n*(M = Mute, D = Déplacer, MC = Mute Casque, A = Aucune / en cas de faute)*`);
+    } catch (e) {}
+  }
 }
 
 const commands = [
   new SlashCommandBuilder().setName('rank').setDescription('Voir son profil'),
   new SlashCommandBuilder().setName('leaderboard').setDescription('Classement'),
-  new SlashCommandBuilder().setName('vp').setDescription('Accéder au panneau exclusif de rôle (Niveau 100 min)'),
   new SlashCommandBuilder().setName('setsalon').setDescription('Salon des annonces (Admin)').addChannelOption(o => o.setName('salon').setDescription('Salon').setRequired(true)),
   new SlashCommandBuilder().setName('addxp').setDescription('Ajouter de l’XP (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('montant').setDescription('XP').setRequired(true)),
   new SlashCommandBuilder().setName('setlevel').setDescription('Modifier le niveau (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('niveau').setDescription('Niveau').setRequired(true)),
-  new SlashCommandBuilder().setName('resetlevel').setDescription('Reset niveau (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true))
+  new SlashCommandBuilder().setName('resetlevel').setDescription('Reset niveau (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
+  // Commandes Vocales (organisées dans l'ordre demandé)
+  new SlashCommandBuilder().setName('vp').setDescription('Verrouiller une vocale avec sanction (Aucun salon créé)').addChannelOption(o => o.setName('vocale').setDescription('Salon vocal').addChannelTypes(ChannelType.GuildVoice).setRequired(true)).addStringOption(o => o.setName('sanction').setDescription('Type de sanction').setRequired(true).addChoices({ name: 'Kick instantané', value: 'kick' }, { name: 'Kick + Timeout 1 min', value: 'timeout' })),
+  new SlashCommandBuilder().setName('ma').setDescription('Autoriser un membre à rejoindre ta vocale verrouillée').addUserOption(o => o.setName('membre').setDescription('Membre à autoriser').setRequired(true)),
+  new SlashCommandBuilder().setName('vpu').setDescription('Rendre une vocale publique').addChannelOption(o => o.setName('vocale').setDescription('Salon vocal').addChannelTypes(ChannelType.GuildVoice).setRequired(true))
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
@@ -71,47 +94,68 @@ client.once('ready', async () => {
   console.log(`Bot connecté : ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try { await rest.put(Routes.applicationCommands(client.user.id), { body: commands }); } catch (e) {}
-  client.user.setPresence({ activities: [{ name: '/vp | Panneau Exclusif Nv 100 🛡️', type: 0 }], status: 'online' });
+  client.user.setPresence({ activities: [{ name: 'Sécurité Vocale & Rôles 🛡️', type: 0 }], status: 'online' });
 });
 
-// --- GESTION DES MESSAGES DANS LE SALON PRIVÉ DE CONFIGURATION ---
+// --- GESTION DES MESSAGES (XP ET CONFIGURATION DU RÔLE NIVEAU 120) ---
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
-  for (const [userId, state] of vpSetupState.entries()) {
-    if (message.author.id === userId && message.channel.id === state.channelId) {
-      if (state.step === 'name') {
-        state.roleName = message.content.trim();
-        state.step = 'color';
-        await message.delete().catch(() => {});
-        return message.channel.send(`🎨 Parfait. Maintenant, écris la **couleur** de ton rôle (ex: \`#FF5733\` ou \`FF0000\`) :`);
-      }
-      else if (state.step === 'color') {
-        let colorInput = message.content.trim();
-        if (!colorInput.startsWith('#')) colorInput = '#' + colorInput;
-        state.roleColor = colorInput;
-        state.step = 'permissions';
-
-        await message.delete().catch(() => {});
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('perm_mute').setLabel('Mute').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId('perm_deafen').setLabel('Mute casque').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId('perm_move').setLabel('Déplacer vocal').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId('perm_none').setLabel('Aucune permission').setStyle(ButtonStyle.Secondary)
-        );
-
-        return message.channel.send({
-          content: `⚡ **Choisis la permission principale** pour ton rôle via les boutons ci-dessous :`,
-          components: [row]
-        });
-      }
+  const userId = message.author.id;
+  if (roleSetupState.has(userId) && message.channel.id === roleSetupState.get(userId)) {
+    let existingRecord = await db.get(`SELECT * FROM custom_roles WHERE userId = ?`, [userId]);
+    if (existingRecord) {
+      await message.channel.send(`❌ Tu as déjà un rôle personnalisé ou tu ne peux plus en créer.`);
+      setTimeout(() => message.channel.delete().catch(() => {}), 4000);
+      roleSetupState.delete(userId);
+      return;
     }
+
+    const parts = message.content.split('|').map(p => p.trim());
+    if (parts.length < 3) {
+      await message.channel.send(`❌ Format incorrect. Utilise : \`Pseudo | Couleur | M, D, MC ou A\``);
+      return;
+    }
+
+    const roleName = parts[0];
+    let roleColor = parts[1];
+    if (!roleColor.startsWith('#')) roleColor = '#' + roleColor;
+    const permChoice = parts[2].toUpperCase();
+
+    let rolePermissions = [];
+    if (permChoice === 'M') {
+      rolePermissions.push(PermissionFlagsBits.MuteMembers);
+    } else if (permChoice === 'D') {
+      rolePermissions.push(PermissionFlagsBits.MoveMembers);
+    } else if (permChoice === 'MC') {
+      rolePermissions.push(PermissionFlagsBits.DeafenMembers);
+    }
+    // Si 'A' ou toute faute de frappe, rolePermissions reste vide (aucune permission)
+
+    try {
+      const createdRole = await message.guild.roles.create({
+        name: roleName,
+        color: roleColor,
+        permissions: rolePermissions,
+        reason: `Rôle exclusif niveau 120 par ${userId}`
+      });
+
+      await message.member.roles.add(createdRole);
+      await db.run(`INSERT OR REPLACE INTO custom_roles (userId, roleId, deleted) VALUES (?, ?, 0)`, [userId, createdRole.id]);
+
+      await message.channel.send(`✅ Ton rôle **${roleName}** a été créé avec succès ! Ce salon va se supprimer.`);
+      roleSetupState.delete(userId);
+      setTimeout(() => message.channel.delete().catch(() => {}), 5000);
+    } catch (e) {
+      await message.channel.send(`❌ Erreur lors de la création du rôle (Vérifie la couleur). Salon supprimé.`);
+      roleSetupState.delete(userId);
+      setTimeout(() => message.channel.delete().catch(() => {}), 5000);
+    }
+    return;
   }
 
-  // Gain d'XP normal sur le serveur
+  // Gain d'XP
   if (!message.guild) return;
-  const userId = message.author.id;
   const guildId = message.guild.id;
   let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, guildId]);
 
@@ -134,120 +178,75 @@ client.on('messageCreate', async message => {
   }
 });
 
-// --- INTERACTIONS (BOUTONS ET COMMANDES SLASH) ---
+// --- SURVEILLANCE DES VOCALES (SANCTIONS) ---
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  if (!newState.channelId || newState.member.user.bot) return;
+  const channelId = newState.channelId;
+  const member = newState.member;
+
+  const lock = await db.get(`SELECT * FROM locked_voices WHERE channelId = ?`, [channelId]);
+  if (!lock) return;
+
+  if (member.id === lock.ownerId) return;
+  const allowed = await db.get(`SELECT * FROM allowed_members WHERE channelId = ? AND userId = ?`, [channelId, member.id]);
+  if (allowed) return;
+
+  try {
+    await member.voice.disconnect("Salon vocal verrouillé");
+    if (lock.sanctionType === 'timeout') {
+      await member.timeout(60 * 1000, "Entrée non autorisée dans un salon verrouillé");
+    }
+  } catch (e) {}
+});
+
+// --- GESTION DES COMMANDES SLASH ---
 client.on('interactionCreate', async interaction => {
-  if (interaction.isButton()) {
-    const userId = interaction.user.id;
-    const customId = interaction.customId;
-
-    // Gestion du menu de masquage / sélection de rôles (Étape 1)
-    if (customId === 'btn_toggle_role' || customId === 'btn_select_role') {
-      const state = vpSetupState.get(userId);
-      if (state && interaction.channel.id === state.channelId) {
-        state.step = 'name';
-        
-        const embed = new EmbedBuilder()
-          .setColor('#3498DB')
-          .setTitle('✏️ Personnalisation de ton Rôle')
-          .setDescription('Écris maintenant dans ce salon le **nom / pseudo** que tu veux donner à ton rôle personnalisé :')
-          .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
-
-        return interaction.update({ embeds: [embed], components: [] });
-      }
-    }
-
-    // Gestion des permissions du rôle (Étape 2)
-    const state = vpSetupState.get(userId);
-    if (state && interaction.channel.id === state.channelId && customId.startsWith('perm_')) {
-      const permType = customId.replace('perm_', '');
-      let rolePermissions = [];
-      if (permType === 'mute') rolePermissions.push(PermissionFlagsBits.MuteMembers);
-      if (permType === 'deafen') rolePermissions.push(PermissionFlagsBits.DeafenMembers);
-      if (permType === 'move') rolePermissions.push(PermissionFlagsBits.MoveMembers);
-
-      try {
-        const guild = interaction.guild;
-        const createdRole = await guild.roles.create({
-          name: state.roleName,
-          color: state.roleColor,
-          permissions: rolePermissions,
-          reason: `Rôle exclusif VP créé par ${userId}`
-        });
-
-        const member = await guild.members.fetch(userId);
-        await member.roles.add(createdRole);
-
-        await db.run(`INSERT OR REPLACE INTO custom_roles (userId, roleId, deleted) VALUES (?, ?, 0)`, [userId, createdRole.id]);
-
-        await interaction.update({ content: `✅ **Succès !** Ton rôle **${state.roleName}** a été créé et t'a été attribué. Ce salon va se supprimer dans 5 secondes...`, components: [] });
-
-        vpSetupState.delete(userId);
-        setTimeout(() => { interaction.channel.delete().catch(() => {}); }, 5000);
-      } catch (e) {
-        await interaction.update({ content: `❌ Erreur lors de la création du rôle. Le salon va se fermer.`, components: [] });
-        vpSetupState.delete(userId);
-        setTimeout(() => { interaction.channel.delete().catch(() => {}); }, 5000);
-      }
-    }
-    return;
-  }
-
   if (!interaction.isChatInputCommand()) return;
   const guildId = interaction.guild ? interaction.guild.id : null;
   const userId = interaction.user.id;
   const { commandName } = interaction;
 
   if (commandName === 'vp') {
-    let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, guildId]);
-    const currentLevel = user ? user.level : 0;
+    const channel = interaction.options.getChannel('vocale');
+    const sanction = interaction.options.getString('sanction');
 
-    if (currentLevel < 100) {
-      return interaction.reply({ content: `❌ Condition non remplie ! Tu es **niveau ${currentLevel}**. Il te faut le **niveau 100** minimum pour accéder à `/vp`.`, ephemeral: true });
+    await db.run(`INSERT OR REPLACE INTO locked_voices (channelId, ownerId, sanctionType) VALUES (?, ?, ?)`, [channel.id, userId, sanction]);
+    return interaction.reply({ content: `🔒 Le salon vocal **${channel.name}** a été verrouillé (Sanction : ${sanction === 'timeout' ? 'Kick + Timeout 1min' : 'Kick instantané'}). Aucun salon créé.`, ephemeral: true });
+  }
+
+  if (commandName === 'ma') {
+    const targetUser = interaction.options.getUser('membre');
+    const memberVoice = interaction.member.voice.channel;
+
+    if (!memberVoice) {
+      return interaction.reply({ content: `❌ Tu dois être dans un salon vocal pour autoriser quelqu'un.`, ephemeral: true });
     }
 
-    let existingRecord = await db.get(`SELECT * FROM custom_roles WHERE userId = ?`, [userId]);
-    if (existingRecord) {
-      if (existingRecord.deleted === 1) {
-        return interaction.reply({ content: `❌ Tu ne peux plus recréer de rôle car tu as supprimé ton précédent rôle exclusif.`, ephemeral: true });
-      } else {
-        return interaction.reply({ content: `❌ Tu as déjà un rôle exclusif actif sur le serveur !`, ephemeral: true });
-      }
+    const lock = await db.get(`SELECT * FROM locked_voices WHERE channelId = ?`, [memberVoice.id]);
+    if (!lock || lock.ownerId !== userId) {
+      return interaction.reply({ content: `❌ Tu ne possèdes pas de verrouillage actif sur ton salon vocal actuel.`, ephemeral: true });
     }
 
-    // Création d'un salon textuel privé unique pour l'utilisateur
-    try {
-      const guild = interaction.guild;
-      const privateChan = await guild.channels.create({
-        name: `vp-${interaction.user.username}`,
-        type: ChannelType.GuildText,
-        permissionOverwrites: [
-          { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-          { id: userId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-          { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
-        ]
-      });
+    await db.run(`INSERT OR IGNORE INTO allowed_members (channelId, userId) VALUES (?, ?)`, [memberVoice.id, targetUser.id]);
+    return interaction.reply({ content: `✅ <@${targetUser.id}> a été autorisé à rejoindre ton salon vocal privé.`, ephemeral: true });
+  }
 
-      vpSetupState.set(userId, { step: 'menu', guildId: guild.id, channelId: privateChan.id });
+  if (commandName === 'vpu') {
+    const channel = interaction.options.getChannel('vocale');
+    const lock = await db.get(`SELECT * FROM locked_voices WHERE channelId = ?`, [channel.id]);
 
-      await interaction.reply({ content: `✅ Ton salon privé a été créé avec succès : <#${privateChan.id}>`, ephemeral: true });
-
-      // Message 1 : Masquer/Afficher et Sélection des rôles avec des boutons
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('btn_toggle_role').setLabel('Masquer / Afficher mes rôles').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('btn_select_role').setLabel('Sélectionner / Gérer mes rôles').setStyle(ButtonStyle.Primary)
-      );
-
-      const embed = new EmbedBuilder()
-        .setColor('#9B59B6')
-        .setTitle('🛡️ Panneau de Gestion Exclusif')
-        .setDescription('Bienvenue dans ton espace privé !\n\n• Tu peux masquer ou afficher tes rôles.\n• Tu peux sélectionner et configurer ton **rôle personnalisé unique** en cliquant sur les boutons ci-dessous.')
-        .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
-
-      await privateChan.send({ embeds: [embed], components: [row] });
-    } catch (e) {
-      await interaction.reply({ content: `❌ Impossible de créer ton salon privé. Vérifie les permissions du bot.`, ephemeral: true });
+    if (!lock) {
+      return interaction.reply({ content: `❌ Ce salon n'est pas verrouillé.`, ephemeral: true });
     }
-    return;
+
+    const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator) || interaction.user.id === interaction.guild.ownerId;
+    if (lock.ownerId !== userId && !isAdmin) {
+      return interaction.reply({ content: `❌ Tu n'es pas le propriétaire de ce verrouillage, tu ne peux pas le rendre public (réservé au créateur ou aux administrateurs).`, ephemeral: true });
+    }
+
+    await db.run(`DELETE FROM locked_voices WHERE channelId = ?`, [channel.id]);
+    await db.run(`DELETE FROM allowed_members WHERE channelId = ?`, [channel.id]);
+    return interaction.reply({ content: `🔓 Le salon vocal **${channel.name}** a été rendu public.`, ephemeral: true });
   }
 
   // Sécurité Admin stricte
@@ -303,3 +302,4 @@ client.on('roleDelete', async role => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
+    
