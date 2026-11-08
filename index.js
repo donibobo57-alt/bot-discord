@@ -42,35 +42,35 @@ async function initDB() {
       bossChannelId TEXT
     );
   `);
-  console.log("📂 Base de données RPG multi-serveurs connectée avec succès !");
+  console.log("📂 Base de données RPG complète connectée avec succès !");
 }
 
 // --- CATALOGUE DES OBJETS & RELIQUES (Boutique & Raretés) ---
 const SHOP_ITEMS = [
   { label: 'Potion de Soin', value: 'potion_soin', price: 30, rarity: 'Commun', description: 'Rétablit un peu d’énergie.' },
   { label: 'Badge Bronze', value: 'badge_bronze', price: 100, rarity: 'Commun', description: 'Un badge basique pour débuter.' },
-  { label: 'Épée en Fer', value: 'epee_fer', price: 450, rarity: 'Peu Commun', description: 'Augmente légèrement la force.' },
-  { label: 'Couleur Néon Profil', value: 'color_neon', price: 1500, rarity: 'Rare', description: 'Illumine ton profil en style futuriste.' },
-  { label: 'Relique Celeste', value: 'relique_celeste', price: 8000, rarity: 'Épique', description: 'Une relique ancienne pleine de mystères.' },
+  { label: 'Épée en Fer', value: 'epee_fer', price: 450, rarity: 'Peu Commun', description: 'Augmente la force.' },
+  { label: 'Couleur Néon', value: 'color_neon', price: 1500, rarity: 'Rare', description: 'Illumine ton profil.' },
+  { label: 'Relique Celeste', value: 'relique_celeste', price: 8000, rarity: 'Épique', description: 'Une relique ancienne.' },
   { label: 'Aura du Dragon', value: 'aura_dragon', price: 25000, rarity: 'Légendaire (Mensuel)', description: 'Objet ultra rare disponible uniquement en fin de mois.' }
 ];
 
-// --- COMMANDES SLASH ---
+// --- TOUTES LES COMMANDES SLASH DU JEU ---
 const commands = [
-  new SlashCommandBuilder().setName('help').setDescription('Affiche la liste complète des commandes du bot RPG'),
+  new SlashCommandBuilder().setName('help').setDescription('Affiche la liste complète et détaillée des commandes du jeu'),
   new SlashCommandBuilder().setName('rank').setDescription('Affiche ton profil complet, niveau, XP et pièces'),
-  new SlashCommandBuilder().setName('leaderboard').setDescription('Affiche le classement des meilleurs joueurs'),
-  new SlashCommandBuilder().setName('shop').setDescription('Ouvre la boutique du serveur avec les proportions et raretés'),
+  new SlashCommandBuilder().setName('leaderboard').setDescription('Affiche le classement des meilleurs joueurs du serveur'),
+  new SlashCommandBuilder().setName('shop').setDescription('Ouvre la boutique interactive avec les proportions et raretés'),
   new SlashCommandBuilder().setName('inventaire').setDescription('Affiche tes objets, équipements et reliques possédés'),
   new SlashCommandBuilder().setName('chasser').setDescription('Combattre un monstre sauvage pour gagner XP, pièces et reliques'),
-  new SlashCommandBuilder().setName('trade').setDescription('Proposer un échange d’objets/reliques à un joueur en MP')
+  new SlashCommandBuilder().setName('trade').setDescription('Proposer un échange sécurisé d’objets/reliques à un joueur en MP')
     .addUserOption(option => option.setName('membre').setDescription('Le joueur avec qui échanger').setRequired(true)),
   new SlashCommandBuilder().setName('fusion').setDescription('Fusionner des reliques pour obtenir des objets supérieurs'),
-  new SlashCommandBuilder().setName('boss').setDescription('Fait apparaître un Boss personnalisé (Réservé Admin)'),
+  new SlashCommandBuilder().setName('boss').setDescription('Fait apparaître un Boss mondial interactif (Réservé Admin)'),
   new SlashCommandBuilder().setName('setsalon').setDescription('Définir le salon pour les mobs ou les boss (Admin)')
     .addStringOption(option => option.setName('type').setDescription('mob ou boss').setRequired(true).addChoices({name: 'Mob', value: 'mob'}, {name: 'Boss', value: 'boss'}))
     .addChannelOption(option => option.setName('salon').setDescription('Le salon cible').setRequired(true)),
-  new SlashCommandBuilder().setName('addxp').setDescription('Ajoute de l’XP en cascade avec calcul automatique de niveau (Admin)')
+  new SlashCommandBuilder().setName('addxp').setDescription('Ajoute de l’XP en cascade avec calcul précis des niveaux (Admin)')
     .addUserOption(option => option.setName('membre').setDescription('Le membre').setRequired(true))
     .addIntegerOption(option => option.setName('montant').setDescription('Quantité d’XP massive').setRequired(true)),
 ].map(command => command.toJSON());
@@ -88,7 +88,7 @@ client.once('ready', async () => {
   }
 
   client.user.setPresence({
-    activities: [{ name: '/help pour jouer | RPG & Niveaux ⚔️', type: 0 }],
+    activities: [{ name: '/help pour jouer | RPG ⚔️', type: 0 }],
     status: 'online',
   });
 });
@@ -135,7 +135,7 @@ client.on('messageCreate', async message => {
   }
 });
 
-// --- GESTION DES INTERACTIONS ---
+// --- GESTION DES INTERACTIONS ET COMMANDES ---
 client.on('interactionCreate', async interaction => {
   const guildId = interaction.guild.id;
   const userId = interaction.user.id;
@@ -146,19 +146,19 @@ client.on('interactionCreate', async interaction => {
     if (commandName === 'help') {
       const embed = new EmbedBuilder()
         .setColor('#3498DB')
-        .setTitle(`📜 Guide & Commandes du Bot RPG`)
-        .setDescription(`Voici la liste complète des commandes de ton aventure :`)
+        .setTitle(`📜 Guide complet & Commandes du Bot RPG`)
+        .setDescription(`Bienvenue dans ton aventure, développée par **${CREATOR_NAME}**. Voici toutes les commandes disponibles :`)
         .addFields(
-          { name: '/rank', value: 'Affiche ta carte de profil, niveau et pièces.' },
-          { name: '/leaderboard', value: 'Classement des meilleurs joueurs du serveur.' },
-          { name: '/shop', value: 'Boutique interactive avec raretés et objets mensuels.' },
-          { name: '/inventaire', value: 'Voir tes objets, équipements et reliques.' },
-          { name: '/chasser', value: 'Combattre des monstres pour gagner XP, pièces et reliques.' },
-          { name: '/trade @membre', value: 'Proposer un échange sécurisé en MP avec un autre joueur.' },
-          { name: '/fusion', value: 'Fusionner des reliques pour obtenir de meilleures récompenses.' },
-          { name: '/boss', value: 'Affronter un boss mondial en équipe (Admin).' },
-          { name: '/setsalon', value: 'Définir les salons dédiés aux mobs et boss (Admin).' },
-          { name: '/addxp', value: 'Ajouter de l’XP massive avec montée en cascade (Admin).' }
+          { name: '/rank', value: 'Affiche ta carte de profil, ton niveau actuel et tes pièces.' },
+          { name: '/leaderboard', value: 'Affiche le classement des meilleurs joueurs du serveur.' },
+          { name: '/shop', value: 'Ouvre la boutique interactive avec les proportions et objets rares mensuels.' },
+          { name: '/inventaire', value: 'Affiche tes objets, équipements et reliques possédés.' },
+          { name: '/chasser', value: 'Combattre des monstres sauvages pour gagner de l’XP, des pièces et des reliques.' },
+          { name: '/trade @membre', value: 'Proposer un échange sécurisé en message privé avec un autre joueur.' },
+          { name: '/fusion', value: 'Fusionner des reliques pour obtenir des objets d’une rareté supérieure.' },
+          { name: '/boss', value: 'Faire apparaître un Boss mondial interactif à spammer en équipe (Admin).' },
+          { name: '/setsalon', value: 'Définir les salons dédiés aux monstres (mobs) ou aux boss (Admin).' },
+          { name: '/addxp', value: 'Ajouter une quantité massive d’XP avec cascade automatique de niveaux (Admin).' }
         )
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
@@ -182,7 +182,7 @@ client.on('interactionCreate', async interaction => {
 
     else if (commandName === 'leaderboard') {
       const topUsers = await db.all(`SELECT * FROM users WHERE guildId = ? ORDER BY level DESC, xp DESC LIMIT 5`, [guildId]);
-      let description = topUsers.map((u, index) => `**#${index + 1}** <@${u.userId}> - Niveau **${u.level}** (${u.xp} XP)`).join('\n') || 'Aucun classement.';
+      let description = topUsers.map((u, index) => `**#${index + 1}** <@${u.userId}> - Niveau **${u.level}** (${u.xp} XP)`).join('\n') || 'Aucun classement pour le moment.';
 
       const embed = new EmbedBuilder()
         .setColor('#FFD700')
@@ -280,7 +280,7 @@ client.on('interactionCreate', async interaction => {
       const embed = new EmbedBuilder()
         .setColor('#F1C40F')
         .setTitle(`✨ Fusion Réussie !`)
-        .setDescription(`Tes reliques ont fusionné pour créer un **Cristal Divin Fusionné** !`)
+        .setDescription(`Tes reliques ont fusionné pour créer un **Cristal Divin Fusionné** exceptionnel !`)
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
       await interaction.reply({ embeds: [embed] });
@@ -300,7 +300,7 @@ client.on('interactionCreate', async interaction => {
       const embed = new EmbedBuilder()
         .setColor('#9B59B6')
         .setTitle(`🤝 Demande d'Échange`)
-        .setDescription(`<@${userId}> souhaite faire un échange avec toi !`)
+        .setDescription(`<@${userId}> souhaite faire un échange sécurisé avec toi !`)
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
       try {
@@ -327,6 +327,7 @@ client.on('interactionCreate', async interaction => {
         let newLevel = user.level;
         let xpNeeded = (newLevel + 1) * 100;
         
+        // Vrai système de cascade : s'il gagne 9000 XP, il monte plusieurs niveaux d'affilée
         while (newXp >= xpNeeded) {
           newXp -= xpNeeded;
           newLevel += 1;
@@ -338,8 +339,8 @@ client.on('interactionCreate', async interaction => {
 
       const embed = new EmbedBuilder()
         .setColor('#2ECC71')
-        .setTitle(`⚡ Administration XP`)
-        .setDescription(`Ajout de **${amount} XP** à ${target.username} (Cascade de niveaux calculée avec succès).`)
+        .setTitle(`⚡ Administration XP Cascade`)
+        .setDescription(`Ajout de **${amount} XP** à ${target.username} avec succès ! (Niveaux recalculés avec précision).`)
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
       await interaction.reply({ embeds: [embed] });
@@ -377,7 +378,7 @@ client.on('interactionCreate', async interaction => {
       const embed = new EmbedBuilder()
         .setColor('#E74C3C')
         .setTitle(`🐉 Un Boss Mondial apparaît !`)
-        .setDescription(`Points de vie : **${bossHp} / 200**\nSpammez le bouton pour l'éliminer !`)
+        .setDescription(`Points de vie : **${bossHp} / 200**\nSpammez le bouton pour l'éliminer tous ensemble !`)
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
       const msg = await interaction.reply({ embeds: [embed], components: [row], fetchReply: true });
@@ -393,7 +394,7 @@ client.on('interactionCreate', async interaction => {
         const updatedEmbed = new EmbedBuilder()
           .setColor('#E74C3C')
           .setTitle(`🐉 Combat contre le Boss Mondial`)
-          .setDescription(bossHp > 0 ? `Points de vie du Boss : **${bossHp} / 200**` : `🏆 Boss vaincu par **${lastAttacker}** !\nDéveloppé par le créateur **${CREATOR_NAME}**.`)
+          .setDescription(bossHp > 0 ? `Points de vie du Boss : **${bossHp} / 200**` : `🏆 Boss vaincu de haute lutte par **${lastAttacker}** !\nDéveloppé par le créateur **${CREATOR_NAME}**.`)
           .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
 
         await i.update({ embeds: [updatedEmbed], components: bossHp > 0 ? [row] : [] });
@@ -404,7 +405,7 @@ client.on('interactionCreate', async interaction => {
           const timeoutEmbed = new EmbedBuilder()
             .setColor('#95A5A6')
             .setTitle(`⏱️ Temps écoulé !`)
-            .setDescription(`Le boss s'est enfui...`)
+            .setDescription(`Le boss s'est enfui dans l'obscurité...`)
             .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
           await msg.edit({ embeds: [timeoutEmbed], components: [] });
         }
@@ -412,17 +413,9 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
+  // Achat dans la boutique via le menu déroulant interactif
   if (interaction.isStringSelectMenu() && interaction.customId === 'shop_select') {
     const selectedItemValue = interaction.values[0];
     const item = SHOP_ITEMS.find(i => i.value === selectedItemValue);
 
-    let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, guildId]);
-    let userCoins = user ? user.coins : 0;
-
-    if (!user || userCoins < item.price) {
-      return interaction.reply({ content: `❌ Pas assez de pièces pour acheter **${item.label}** (${item.price} 🪙).`, ephemeral: true });
-    }
-
-    await db.run(`UPDATE users SET coins = coins - ? WHERE userId = ? AND guildId = ?`, [item.price, userId, guildId]);
-    await db.run(`INSERT INTO inventory (userId, guildId, item) VALUES (?, ?, ?)`, [userId, guildId, item.label]);
-    
+    let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, guild
