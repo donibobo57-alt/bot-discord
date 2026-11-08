@@ -16,7 +16,6 @@ async function initDB() {
   `);
 }
 
-// Rôles automatiques par palier
 async function applyLevelRoles(member, lvl) {
   if (!member || !member.guild) return;
   const roles = { 10: 'Novice des messages', 30: 'Avancé des messages', 50: 'Semi-Pro message', 80: 'Légendaire des messages', 100: 'Légende du message' };
@@ -32,14 +31,15 @@ async function applyLevelRoles(member, lvl) {
   } catch (e) {}
 }
 
-async function addXp(member, guildId, add, defChan) {
+// Fonction d'ajout d'XP par message (avec notifications activées uniquement ici)
+async function addXpFromMessage(member, guildId, add, defChan) {
   let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [member.id, guildId]) || { xp: 0, level: 0 };
   let xp = u.xp + add, lvl = u.level, need = 100 + (lvl * 25);
   let cfg = await db.get(`SELECT chanId FROM config WHERE guildId = ?`, [guildId]);
   let chan = cfg ? member.guild.channels.cache.get(cfg.chanId) || defChan : defChan;
 
   let loops = 0;
-  while (xp >= need && loops < 100) {
+  while (xp >= need && loops < 50) {
     xp -= need; lvl++; loops++; need = 100 + (lvl * 25);
     await applyLevelRoles(member, lvl);
     if (chan) {
@@ -47,7 +47,6 @@ async function addXp(member, guildId, add, defChan) {
     }
   }
   await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [member.id, guildId, xp, lvl]);
-  return lvl;
 }
 
 const cmds = [
@@ -69,12 +68,12 @@ client.once('ready', async () => {
 
 client.on('messageCreate', async m => {
   if (m.author.bot || !m.guild || !db) return;
-  await addXp(m.member, m.guild.id, 15, m.channel);
+  await addXpFromMessage(m.member, m.guild.id, 15, m.channel);
 });
 
 client.on('voiceStateUpdate', async (oldS, newS) => {
   if (!newS.channelId || newS.member.user.bot || !db) return;
-  let b = await db.get(`SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'black'`, [newS.channelId, newS.member.id]);
+  let b = await db.get(`SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'black' AND channelId IN (SELECT channelId FROM locks)`, [newS.channelId, newS.member.id]);
   if (b) return newS.member.voice.disconnect().catch(() => {});
   let l = await db.get(`SELECT * FROM locks WHERE channelId = ?`, [newS.channelId]);
   if (!l || newS.member.id === l.ownerId) return;
@@ -86,8 +85,8 @@ client.on('voiceStateUpdate', async (oldS, newS) => {
 });
 
 client.on('interactionCreate', async i => {
-  if (!db) return;
-  const gId = i.guild?.id, uId = i.user.id;
+  if (!db || !i.guild) return;
+  const gId = i.guild.id, uId = i.user.id;
 
   if (i.isChatInputCommand()) {
     const { commandName, options } = i;
@@ -108,7 +107,7 @@ client.on('interactionCreate', async i => {
       return i.reply({ embeds: [new EmbedBuilder().setColor('#3498db').setTitle('🛡️ Centre Vocal').setDescription('Sélectionne une option :')], components: [row], ephemeral: true });
     }
 
-    // Gestion Sécurité Admin avec Embed Rouge personnalisé
+    // Gestion admin avec sanction rouge + timeout 1 min
     if (['setsalon', 'addxp', 'setlevel', 'resetlevel'].includes(commandName)) {
       let isAdmin = i.member.permissions.has(PermissionFlagsBits.Administrator) || uId === i.guild.ownerId;
       if (!isAdmin) {
@@ -136,11 +135,16 @@ client.on('interactionCreate', async i => {
       return i.reply({ content: `✅ Salon défini sur <#${c.id}>.`, ephemeral: true });
     }
 
+    // Commandes admin d'XP / Niveau SANS AUCUN ENVOI DE NOTIFICATION DANS LE CHAT
     if (commandName === 'addxp') {
       let target = options.getUser('membre'), amt = options.getInteger('montant');
       let mem = await i.guild.members.fetch(target.id);
-      let lvl = await addXp(mem, gId, amt, i.channel);
-      return i.reply({ content: `✅ Ajout de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}).`, ephemeral: true });
+      let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [target.id, gId]) || { xp: 0, level: 0 };
+      let xp = u.xp + amt, lvl = u.level, need = 100 + (lvl * 25);
+      while (xp >= need) { xp -= need; lvl++; need = 100 + (lvl * 25); }
+      await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [target.id, gId, xp, lvl]);
+      await applyLevelRoles(mem, lvl);
+      return i.reply({ content: `✅ Ajout discret de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}, aucun message envoyé).`, ephemeral: true });
     }
 
     if (commandName === 'setlevel') {
@@ -148,7 +152,7 @@ client.on('interactionCreate', async i => {
       let mem = await i.guild.members.fetch(target.id);
       await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, ?)`, [target.id, gId, lvl]);
       await applyLevelRoles(mem, lvl);
-      return i.reply({ content: `✅ Niveau de <@${target.id}> fixé à **${lvl}**.`, ephemeral: true });
+      return i.reply({ content: `✅ Niveau de <@${target.id}> fixé à **${lvl}** (Discret, sans notification).`, ephemeral: true });
     }
 
     if (commandName === 'resetlevel') {
@@ -156,7 +160,7 @@ client.on('interactionCreate', async i => {
       let mem = await i.guild.members.fetch(target.id);
       await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)`, [target.id, gId]);
       await applyLevelRoles(mem, 0);
-      return i.reply({ content: `✅ Progression de <@${target.id}> réinitialisée.`, ephemeral: true });
+      return i.reply({ content: `✅ Progression de <@${target.id}> réinitialisée discrètement.`, ephemeral: true });
     }
   }
 
@@ -195,4 +199,3 @@ client.on('interactionCreate', async i => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
-
