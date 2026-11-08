@@ -2,32 +2,18 @@ const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Rout
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 
-const client = new Client({ 
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildVoiceStates
-  ] 
-});
-
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates] });
 let db;
 const CREATOR = "bankiozi";
 
 async function initDB() {
-  try {
-    db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS users (userId TEXT, guildId TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 0, PRIMARY KEY (userId, guildId));
-      CREATE TABLE IF NOT EXISTS config (guildId TEXT PRIMARY KEY, chanId TEXT);
-      CREATE TABLE IF NOT EXISTS locks (channelId TEXT PRIMARY KEY, ownerId TEXT, type TEXT);
-      CREATE TABLE IF NOT EXISTS access (channelId TEXT, userId TEXT, mode TEXT, PRIMARY KEY (channelId, userId, mode));
-    `);
-    console.log("📂 [DB] Base de données initialisée avec succès.");
-  } catch (e) {
-    console.error("❌ [DB] Erreur d'initialisation de la base de données :", e);
-  }
+  db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS users (userId TEXT, guildId TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 0, PRIMARY KEY (userId, guildId));
+    CREATE TABLE IF NOT EXISTS config (guildId TEXT PRIMARY KEY, chanId TEXT);
+    CREATE TABLE IF NOT EXISTS locks (channelId TEXT PRIMARY KEY, ownerId TEXT, type TEXT);
+    CREATE TABLE IF NOT EXISTS access (channelId TEXT, userId TEXT, mode TEXT, PRIMARY KEY (channelId, userId, mode));
+  `);
 }
 
 async function applyLevelRoles(member, lvl) {
@@ -35,44 +21,31 @@ async function applyLevelRoles(member, lvl) {
   const roles = { 10: 'Novice des messages', 30: 'Avancé des messages', 50: 'Semi-Pro message', 80: 'Légendaire des messages', 100: 'Légende du message' };
   let targetName = null;
   for (const [l, name] of Object.entries(roles)) { if (lvl >= parseInt(l)) targetName = name; }
-  
+  let role = targetName ? member.guild.roles.cache.find(r => r.name === targetName) : null;
+  if (targetName && !role) { try { role = await member.guild.roles.create({ name: targetName, color: '#5865F2' }); } catch (e) {} }
   try {
-    let role = targetName ? member.guild.roles.cache.find(r => r.name === targetName) : null;
-    if (targetName && !role) {
-      role = await member.guild.roles.create({ name: targetName, color: '#5865F2', reason: 'Rôles automatiques du bot' }).catch(() => {});
-    }
-    if (!role) return;
-
     for (const r of member.roles.cache.filter(r => Object.values(roles).includes(r.name)).values()) {
-      if (r.id !== role.id) await member.roles.remove(r).catch(() => {});
+      if (!role || r.id !== role.id) await member.roles.remove(r).catch(() => {});
     }
-    if (!member.roles.cache.has(role.id)) {
-      await member.roles.add(role).catch(() => {});
-    }
-  } catch (e) {
-    // Gestion silencieuse pour éviter tout crash si le bot manque de permissions hiérarchiques
-  }
+    if (role && !member.roles.cache.has(role.id)) await member.roles.add(role).catch(() => {});
+  } catch (e) {}
 }
 
 async function addXpFromMessage(member, guildId, add, defChan) {
-  try {
-    let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [member.id, guildId]) || { xp: 0, level: 0 };
-    let xp = u.xp + add, lvl = u.level, need = 100 + (lvl * 25);
-    let cfg = await db.get(`SELECT chanId FROM config WHERE guildId = ?`, [guildId]);
-    let chan = cfg ? member.guild.channels.cache.get(cfg.chanId) || defChan : defChan;
+  let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [member.id, guildId]) || { xp: 0, level: 0 };
+  let xp = u.xp + add, lvl = u.level, need = 100 + (lvl * 25);
+  let cfg = await db.get(`SELECT chanId FROM config WHERE guildId = ?`, [guildId]);
+  let chan = cfg ? member.guild.channels.cache.get(cfg.chanId) || defChan : defChan;
 
-    let loops = 0;
-    while (xp >= need && loops < 50) {
-      xp -= need; lvl++; loops++; need = 100 + (lvl * 25);
-      await applyLevelRoles(member, lvl);
-      if (chan) {
-        chan.send({ embeds: [new EmbedBuilder().setColor('#00FFCC').setTitle('🎉 NOUVEAU NIVEAU !').setDescription(`Félicitations <@${member.id}>, tu passes au **niveau ${lvl}** ! 🚀`).setFooter({ text: CREATOR })] }).catch(() => {});
-      }
+  let loops = 0;
+  while (xp >= need && loops < 10) { // Sécurité stricte anti-freeze (max 10 niveaux par message)
+    xp -= need; lvl++; loops++; need = 100 + (lvl * 25);
+    await applyLevelRoles(member, lvl);
+    if (chan) {
+      chan.send({ embeds: [new EmbedBuilder().setColor('#00FFCC').setTitle('🎉 NOUVEAU NIVEAU !').setDescription(`Félicitations <@${member.id}>, tu passes au **niveau ${lvl}** ! 🚀`).setFooter({ text: CREATOR })] }).catch(() => {});
     }
-    await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [member.id, guildId, xp, lvl]);
-  } catch (e) {
-    console.error("❌ Erreur dans addXpFromMessage :", e);
   }
+  await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [member.id, guildId, xp, lvl]);
 }
 
 const cmds = [
@@ -88,22 +61,11 @@ const cmds = [
 
 client.once('ready', async () => {
   await initDB();
-  console.log(`🤖 [BOT] Connecté avec succès : ${client.user.tag}`);
-  
-  try {
-    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-    await rest.put(Routes.applicationCommands(client.user.id), { body: cmds });
-    console.log("🔄 [REST] Commandes synchronisées avec succès.");
-  } catch (e) {
-    console.error("❌ [REST] Erreur de synchronisation des commandes :", e);
-  }
-  
-  client.user.setPresence({ activities: [{ name: '/menu vocal | 🛡️ Sécurité' }], status: 'online' });
+  console.log(`🤖 Bot connecté : ${client.user.tag}`);
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+  await rest.put(Routes.applicationCommands(client.user.id), { body: cmds });
+  client.user.setPresence({ activities: [{ name: '/menu vocal | 🛡️' }], status: 'online' });
 });
-
-// Gestion anti-déconnexion et reconnexion automatique
-client.on('shardDisconnect', () => console.warn("⚠️ [BOT] Le bot s'est déconnecté. Tentative de reconnexion..."));
-client.on('shardReconnecting', () => console.log("🔄 [BOT] Reconnexion en cours..."));
 
 client.on('messageCreate', async m => {
   if (m.author.bot || !m.guild || !db) return;
@@ -112,23 +74,19 @@ client.on('messageCreate', async m => {
 
 client.on('voiceStateUpdate', async (oldS, newS) => {
   if (!newS.channelId || newS.member.user.bot || !db) return;
-  try {
-    let b = await db.get(`SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'black'`, [newS.channelId, newS.member.id]);
-    if (b) {
-      await newS.member.voice.disconnect("Blacklisté de ce salon").catch(() => {});
-      return;
+  let b = await db.get(`SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'black'`, [newS.channelId, newS.member.id]);
+  if (b) {
+    await newS.member.voice.disconnect("Blacklisté de ce salon").catch(() => {});
+    return;
+  }
+  let l = await db.get(`SELECT * FROM locks WHERE channelId = ?`, [newS.channelId]);
+  if (!l || newS.member.id === l.ownerId) return;
+  let a = await db.get(`SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'white'`, [newS.channelId, newS.member.id]);
+  if (!a) {
+    await newS.member.voice.disconnect("Salon verrouillé").catch(() => {});
+    if (l.type === 'timeout') {
+      try { await newS.member.timeout(60000, "Tentative d'intrusion dans un salon vocal verrouillé"); } catch (e) {}
     }
-    let l = await db.get(`SELECT * FROM locks WHERE channelId = ?`, [newS.channelId]);
-    if (!l || newS.member.id === l.ownerId) return;
-    let a = await db.get(`SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'white'`, [newS.channelId, newS.member.id]);
-    if (!a) {
-      await newS.member.voice.disconnect("Salon verrouillé").catch(() => {});
-      if (l.type === 'timeout') {
-        await newS.member.timeout(60000, "Tentative d'intrusion dans un salon vocal verrouillé").catch(() => {});
-      }
-    }
-  } catch (e) {
-    console.error("Erreur voiceStateUpdate :", e);
   }
 });
 
@@ -156,14 +114,12 @@ client.on('interactionCreate', async i => {
         return i.reply({ embeds: [new EmbedBuilder().setColor('#3498db').setTitle('🛡️ Centre Vocal').setDescription('Sélectionne une option :')], components: [row], ephemeral: true });
       }
 
-      // SÉCURITÉ ADMIN : Vérification propre et application du Timeout 1 min sans crash
+      // Sécurité Admin avec Timeout garanti
       if (['setsalon', 'addxp', 'setlevel', 'resetlevel', 'less'].includes(commandName)) {
         let isAdmin = i.member.permissions.has(PermissionFlagsBits.Administrator) || uId === i.guild.ownerId;
         if (!isAdmin) {
           try { 
-            if (i.member.moderatable) {
-              await i.member.timeout(60000, "Tentative d'utilisation non autorisée d'une commande administrative"); 
-            }
+            if (i.member.moderatable) await i.member.timeout(60000, "Tentative d'utilisation non autorisée d'une commande administrative"); 
           } catch(e) {}
           
           return i.reply({ 
@@ -197,7 +153,8 @@ client.on('interactionCreate', async i => {
         let mem = await i.guild.members.fetch(target.id);
         let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [target.id, gId]) || { xp: 0, level: 0 };
         let xp = u.xp + amt, lvl = u.level, need = 100 + (lvl * 25);
-        while (xp >= need) { xp -= need; lvl++; need = 100 + (lvl * 25); }
+        let loops = 0;
+        while (xp >= need && loops < 50) { xp -= need; lvl++; loops++; need = 100 + (lvl * 25); }
         await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [target.id, gId, xp, lvl]);
         await applyLevelRoles(mem, lvl);
         return i.reply({ content: `✅ Ajout de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}).`, ephemeral: true });
@@ -268,12 +225,8 @@ client.on('interactionCreate', async i => {
       }
     }
   } catch (err) {
-    console.error("❌ Erreur critique dans interactionCreate :", err);
-    if (i.isRepliable() && !i.replied && !i.deferred) {
-      await i.reply({ content: "Une erreur est survenue lors de l'exécution de cette commande.", ephemeral: true }).catch(() => {});
-    }
+    console.error("Erreur interaction :", err);
   }
 });
 
 client.login(process.env.DISCORD_TOKEN);
-                                                                                                                                                                                           
