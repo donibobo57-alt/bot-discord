@@ -1,10 +1,11 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, ActionRowBuilder, StringSelectMenuBuilder } = require('discord.js');
-const sqlite3 = require('sqlite3().verbose');
+const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates] });
 let db;
 const CREATOR = "bankiozi";
+const MAX_LEVEL = 120; // Niveau maximum fixé à 120
 
 async function initDB() {
   db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
@@ -32,26 +33,30 @@ async function applyLevelRoles(member, lvl) {
 }
 
 async function addXpFromMessage(member, guildId, add, defChan) {
-  let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [member.id, guildId]) || { xp: 0, level: 0 };
-  
-  // Plafond de sécurité anti-bug si le niveau est corrompu ou trop élevé
-  if (u.level > 200) u.level = 200;
+  let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [member.id, guildId]);
+  if (!u) {
+    await db.run(`INSERT INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)`, [member.id, guildId]);
+    u = { xp: 0, level: 0 };
+  }
+
+  if (u.level >= MAX_LEVEL) return; // Bloqué au niveau max 120
 
   let xp = u.xp + add, lvl = u.level, need = 100 + (lvl * 25);
   let cfg = await db.get(`SELECT chanId FROM config WHERE guildId = ?`, [guildId]);
   let chan = cfg ? member.guild.channels.cache.get(cfg.chanId) || defChan : defChan;
 
   let loops = 0;
-  while (xp >= need && loops < 5) {
+  while (xp >= need && loops < 5 && lvl < MAX_LEVEL) {
     xp -= need; lvl++; loops++; 
-    if (lvl > 200) lvl = 200; // Bloque le niveau max à 200 pour éviter l'explosion
+    if (lvl > MAX_LEVEL) lvl = MAX_LEVEL;
     need = 100 + (lvl * 25);
     await applyLevelRoles(member, lvl);
     if (chan) {
       chan.send({ embeds: [new EmbedBuilder().setColor('#00FFCC').setTitle('🎉 NOUVEAU NIVEAU !').setDescription(`Félicitations <@${member.id}>, tu passes au **niveau ${lvl}** ! 🚀`).setFooter({ text: CREATOR })] }).catch(() => {});
     }
   }
-  await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [member.id, guildId, xp, lvl]);
+  if (lvl >= MAX_LEVEL) xp = 0; // Bloque l'XP excédentaire au max
+  await db.run(`UPDATE users SET xp = ?, level = ? WHERE userId = ? AND guildId = ?`, [xp, lvl, member.id, guildId]);
 }
 
 const cmds = [
@@ -59,7 +64,7 @@ const cmds = [
   new SlashCommandBuilder().setName('leaderboard').setDescription('Classement du serveur'),
   new SlashCommandBuilder().setName('setsalon').setDescription('Salon des niveaux (Admin)').addChannelOption(o => o.setName('salon').setDescription('Salon').setRequired(true)),
   new SlashCommandBuilder().setName('addxp').setDescription('Ajouter de l’XP (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('montant').setDescription('XP').setRequired(true)),
-  new SlashCommandBuilder().setName('setlevel').setDescription('Modifier le niveau (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('niveau').setDescription('Niveau (Max 200)').setRequired(true)),
+  new SlashCommandBuilder().setName('setlevel').setDescription('Modifier le niveau (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('niveau').setDescription('Niveau (Max 120)').setRequired(true)),
   new SlashCommandBuilder().setName('resetlevel').setDescription('Réinitialiser (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
   new SlashCommandBuilder().setName('less').setDescription('Renommer un membre (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addStringOption(o => o.setName('nouveau_nom').setDescription('Nouveau pseudo').setRequired(true)),
   new SlashCommandBuilder().setName('menu').setDescription('Centre de contrôle').addSubcommand(s => s.setName('vocal').setDescription('Sécurité vocale (Niveau 100+)'))
@@ -67,7 +72,7 @@ const cmds = [
 
 client.once('ready', async () => {
   await initDB();
-  console.log(`🤖 Bot connecté et sécurisé : ${client.user.tag}`);
+  console.log(`🤖 Bot connecté et stable : ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   await rest.put(Routes.applicationCommands(client.user.id), { body: cmds });
   client.user.setPresence({ activities: [{ name: '/menu vocal | 🛡️' }], status: 'online' });
@@ -106,7 +111,8 @@ client.on('interactionCreate', async i => {
 
       if (commandName === 'menu' && options.getSubcommand() === 'vocal') {
         let u = await db.get(`SELECT level FROM users WHERE userId = ? AND guildId = ?`, [uId, gId]);
-        if (!u || u.level < 100) return i.reply({ content: `⛔ Niveau **100** requis (Ton niveau : ${u ? u.level : 0}).`, ephemeral: true });
+        let lvl = u ? u.level : 0;
+        if (lvl < 100) return i.reply({ content: `⛔ Niveau **100** requis (Ton niveau : ${lvl}).`, ephemeral: true });
         
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder().setCustomId('v_sel').setPlaceholder('Choisis une action...').addOptions([
@@ -120,7 +126,7 @@ client.on('interactionCreate', async i => {
         return i.reply({ embeds: [new EmbedBuilder().setColor('#3498db').setTitle('🛡️ Centre Vocal').setDescription('Sélectionne une option :')], components: [row], ephemeral: true });
       }
 
-      // Sécurité Admin stricte
+      // Sécurité Admin avec Timeout garanti
       if (['setsalon', 'addxp', 'setlevel', 'resetlevel', 'less'].includes(commandName)) {
         let isAdmin = i.member.permissions.has(PermissionFlagsBits.Administrator) || uId === i.guild.ownerId;
         if (!isAdmin) {
@@ -136,11 +142,16 @@ client.on('interactionCreate', async i => {
       }
 
       if (commandName === 'rank') {
-        let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [uId, gId]) || { xp: 0, level: 0 };
-        if (u.level > 200) u.level = 200;
+        let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [uId, gId]);
+        if (!u) {
+          u = { xp: 0, level: 0 };
+          await db.run(`INSERT INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)`, [uId, gId]);
+        }
+        if (u.level > MAX_LEVEL) u.level = MAX_LEVEL;
         let need = 100 + (u.level * 25), pct = Math.min(Math.floor((u.xp / need) * 100), 100);
         let bar = '█'.repeat(Math.floor(pct / 10)) + '░'.repeat(10 - Math.floor(pct / 10));
-        return i.reply({ embeds: [new EmbedBuilder().setColor('#5865F2').setTitle(`🌟 Profil de ${i.user.username}`).setThumbnail(i.user.displayAvatarURL()).addFields({ name: 'Niveau', value: `\`${u.level}\``, inline: true }, { name: 'XP', value: `\`${u.xp} / ${need}\``, inline: true }, { name: 'Progression', value: `\`${bar}\` **${pct}%**`, inline: false }).setFooter({ text: CREATOR })] });
+        
+        return i.reply({ embeds: [new EmbedBuilder().setColor('#5865F2').setTitle(`🌟 Profil de ${i.user.username}`).setThumbnail(i.user.displayAvatarURL()).addFields({ name: 'Niveau', value: `\`${u.level} / ${MAX_LEVEL}\``, inline: true }, { name: 'XP', value: `\`${u.xp} / ${need}\``, inline: true }, { name: 'Progression', value: `\`${bar}\` **${pct}%**`, inline: false }).setFooter({ text: CREATOR })] });
       }
 
       if (commandName === 'leaderboard') {
@@ -159,25 +170,28 @@ client.on('interactionCreate', async i => {
         let target = options.getUser('membre'), amt = options.getInteger('montant');
         let mem = await i.guild.members.fetch(target.id);
         let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [target.id, gId]) || { xp: 0, level: 0 };
+        if (u.level >= MAX_LEVEL) return i.reply({ content: `❌ Ce membre est déjà au niveau maximum (${MAX_LEVEL}).`, ephemeral: true });
+        
         let xp = u.xp + amt, lvl = u.level, need = 100 + (lvl * 25);
         let loops = 0;
-        while (xp >= need && loops < 20) { 
+        while (xp >= need && loops < 20 && lvl < MAX_LEVEL) { 
           xp -= need; lvl++; loops++; 
-          if (lvl > 200) lvl = 200;
+          if (lvl > MAX_LEVEL) lvl = MAX_LEVEL;
           need = 100 + (lvl * 25); 
         }
+        if (lvl >= MAX_LEVEL) xp = 0;
         await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [target.id, gId, xp, lvl]);
         await applyLevelRoles(mem, lvl);
-        return i.reply({ content: `✅ Ajout de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}).`, ephemeral: true });
+        return i.reply({ content: `✅ Ajout de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}/${MAX_LEVEL}).`, ephemeral: true });
       }
 
       if (commandName === 'setlevel') {
         let target = options.getUser('membre'), lvl = options.getInteger('niveau');
-        if (lvl > 200) lvl = 200; // Plafond maximal de sécurité
+        if (lvl > MAX_LEVEL) lvl = MAX_LEVEL;
         let mem = await i.guild.members.fetch(target.id);
         await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, ?)`, [target.id, gId, lvl]);
         await applyLevelRoles(mem, lvl);
-        return i.reply({ content: `✅ Niveau de <@${target.id}> fixé à **${lvl}**.`, ephemeral: true });
+        return i.reply({ content: `✅ Niveau de <@${target.id}> fixé à **${lvl}/${MAX_LEVEL}**.`, ephemeral: true });
       }
 
       if (commandName === 'resetlevel') {
@@ -244,12 +258,7 @@ client.on('interactionCreate', async i => {
   }
 });
 
-// Sécurité anti-crash globale de Node.js pour forcer le bot à rester en vie sur Render
-process.on('unhandledRejection', error => {
-  console.error('Erreur non gérée :', error);
-});
-process.on('uncaughtException', error => {
-  console.error('Exception non interceptée :', error);
-});
+process.on('unhandledRejection', error => console.error('Erreur non gérée :', error));
+process.on('uncaughtException', error => console.error('Exception non interceptée :', error));
 
 client.login(process.env.DISCORD_TOKEN);
