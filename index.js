@@ -16,10 +16,8 @@ const client = new Client({
 let db;
 const CREATOR_NAME = "bankiozi";
 
-// Stockage temporaire pour les salons vocaux sécurisés
-const lockedVoiceChannels = new Map(); // channelId -> { ownerId, sanction: true/false }
-// Stockage temporaire pour l'étape de sélection du type de sanction
-const pendingVoiceSetup = new Map(); // userId -> channelId
+const lockedVoiceChannels = new Map();
+const pendingVoiceSetup = new Map();
 
 // --- INITIALISATION DE LA BASE DE DONNÉES ---
 async function initDB() {
@@ -29,25 +27,14 @@ async function initDB() {
   });
 
   await db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      userId TEXT,
-      guildId TEXT,
-      xp INTEGER DEFAULT 0,
-      level INTEGER DEFAULT 0,
-      PRIMARY KEY (userId, guildId)
-    );
-    CREATE TABLE IF NOT EXISTS config (
-      guildId TEXT PRIMARY KEY,
-      notifChannelId TEXT
-    );
-    CREATE TABLE IF NOT EXISTS redeemed_codes (
-      userId TEXT PRIMARY KEY
-    );
+    CREATE TABLE IF NOT EXISTS users (userId TEXT, guildId TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 0, PRIMARY KEY (userId, guildId));
+    CREATE TABLE IF NOT EXISTS config (guildId TEXT PRIMARY KEY, notifChannelId TEXT);
+    CREATE TABLE IF NOT EXISTS redeemed_codes (userId TEXT PRIMARY KEY);
   `);
-  console.log("📂 Base de données connectée et sécurisée avec succès !");
+  console.log("📂 Base de données connectée avec succès !");
 }
 
-// --- GESTION PROPRE DES RÔLES DE NIVEAU ---
+// --- GESTION DES RÔLES DE NIVEAU (REMPLACEMENT AUTOMATIQUE) ---
 async function checkAndApplyLevelRoles(member, newLevel, channel) {
   if (!member || !member.guild) return;
   const guild = member.guild;
@@ -65,30 +52,21 @@ async function checkAndApplyLevelRoles(member, newLevel, channel) {
 
   let targetRoleName = null;
   for (const [lvlNum, roleName] of Object.entries(roleMap)) {
-    if (newLevel >= parseInt(lvlNum)) {
-      targetRoleName = roleName;
-    }
+    if (newLevel >= parseInt(lvlNum)) targetRoleName = roleName;
   }
 
-  let targetRole = null;
-  if (targetRoleName) {
-    targetRole = guild.roles.cache.find(r => r.name === targetRoleName);
-    if (!targetRole) {
-      try {
-        targetRole = await guild.roles.create({ name: targetRoleName, color: '#5865F2', reason: 'Rôle de niveau automatique' });
-      } catch (e) {}
-    }
+  let targetRole = targetRoleName ? guild.roles.cache.find(r => r.name === targetRoleName) : null;
+  if (targetRoleName && !targetRole) {
+    try {
+      targetRole = await guild.roles.create({ name: targetRoleName, color: '#5865F2', reason: 'Rôle de niveau automatique' });
+    } catch (e) {}
   }
 
   try {
     for (const role of rolesToRemove.values()) {
-      if (!targetRole || role.id !== targetRole.id) {
-        await member.roles.remove(role).catch(() => {});
-      }
+      if (!targetRole || role.id !== targetRole.id) await member.roles.remove(role).catch(() => {});
     }
-    if (targetRole && !member.roles.cache.has(targetRole.id)) {
-      await member.roles.add(targetRole).catch(() => {});
-    }
+    if (targetRole && !member.roles.cache.has(targetRole.id)) await member.roles.add(targetRole).catch(() => {});
   } catch (e) {}
 
   if (channel) {
@@ -101,7 +79,7 @@ async function checkAndApplyLevelRoles(member, newLevel, channel) {
   }
 }
 
-// --- COMMANDES SLASH SUR LE SERVEUR (Admin & Profil uniquement) ---
+// --- COMMANDES SLASH PUBLIQUES & ADMIN ---
 const commands = [
   new SlashCommandBuilder().setName('rank').setDescription('Voir sa carte de niveau et profil'),
   new SlashCommandBuilder().setName('leaderboard').setDescription('Classement général des membres'),
@@ -132,142 +110,91 @@ client.once('ready', async () => {
   client.user.setPresence({ activities: [{ name: '/rank | Système d’XP 📊', type: 0 }], status: 'online' });
 });
 
-// --- ACCUEIL EN DM LORS DE L'ARRIVÉE SUR LE SERVEUR ---
+// --- ACCUEIL EN DM LORS DE L'ARRIVÉE ---
 client.on('guildMemberAdd', async member => {
   try {
     const welcomeEmbed = new EmbedBuilder()
       .setColor('#3498DB')
       .setTitle(`✨ Bienvenue sur ${member.guild.name} !`)
-      .setDescription('Ton compte est connecté au système. En écrivant directement en **Message Privé (DM)** avec moi, tu peux utiliser les commandes secrètes textuelles :\n\n' +
-        '• `!code 2252` : Valider ton code secret (Requiert le niveau 120)\n' +
-        '• `!dmanonyme @Membre Message` : Envoyer un message anonyme\n' +
-        '• `!vp` ou `!vocal` : Lister les salons vocaux du serveur et les sécuriser en privé')
+      .setDescription('Envoie-moi `!code 2252` en Message Privé (DM) si tu trouves le code secret pour débloquer les commandes exclusives (`!vp`).')
       .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
     await member.send({ embeds: [welcomeEmbed] });
   } catch (e) {}
 });
 
-// --- GESTION DES MESSAGES ET COMMANDES TEXTUELLES EN DM ---
+// --- GESTION DES MESSAGES (XP ET COMMANDES TEXTUELLES EN DM) ---
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
-  // --- COMMANDES TEXTUELLES EN DM ---
+  // Commandes textuelles secrètes en Message Privé (DM)
   if (!message.guild) {
     const content = message.content.trim();
     const userId = message.author.id;
 
-    // 1. Commande !code
     if (content.startsWith('!code')) {
-      const args = content.split(' ');
-      const secret = args[1];
+      const parts = content.split(' ');
+      const secret = parts[1];
 
       if (secret !== '2252') {
-        return message.reply('❌ Code secret incorrect. Réessaie avec `!code [ton_code]`.');
+        return message.reply('❌ Code invalide.');
       }
 
       let redeemed = await db.get(`SELECT * FROM redeemed_codes WHERE userId = ?`, [userId]);
-      if (redeemed) {
-        return message.reply('❌ Tu as déjà validé ce code par le passé !');
-      }
+      if (redeemed) return message.reply('❌ Tu as déjà validé ce code.');
 
       const mutualGuild = client.guilds.cache.find(g => g.members.cache.has(userId));
-      if (!mutualGuild) {
-        return message.reply('❌ Erreur : Tu n’es dans aucun serveur commun avec ce bot.');
-      }
+      if (!mutualGuild) return message.reply('❌ Aucun serveur commun trouvé.');
 
       let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, mutualGuild.id]);
       const currentLevel = user ? user.level : 0;
 
       if (currentLevel < 120) {
-        return message.reply(`❌ Condition non remplie ! Tu es actuellement **niveau ${currentLevel}**. Il te faut être minimum **niveau 120** pour valider ce code. Va farmer de l'XP !`);
+        return message.reply(`❌ Condition non remplie ! Tu es niveau **${currentLevel}**. Il te faut le niveau 120 minimum. Va farmer !`);
       }
 
       const member = await mutualGuild.members.fetch(userId).catch(() => null);
       if (member) {
         let role = mutualGuild.roles.cache.find(r => r.name === 'Béni par le bot');
         if (!role) {
-          try {
-            role = await mutualGuild.roles.create({ name: 'Béni par le bot', color: '#00FF00', reason: 'Code secret 2252 validé' });
-          } catch (e) {}
+          try { role = await mutualGuild.roles.create({ name: 'Béni par le bot', color: '#00FF00', reason: 'Code secret validé' }); } catch (e) {}
         }
         if (role) await member.roles.add(role).catch(() => {});
       }
 
       await db.run(`INSERT INTO redeemed_codes (userId) VALUES (?)`, [userId]);
-      return message.reply('✅ **Félicitations !** Code validé avec succès. Tu as reçu le rôle **"Béni par le bot"** (en vert) sur le serveur !');
+      return message.reply('✅ Code validé avec succès ! Tu débloques désormais la commande privée `!vp`.');
     }
 
-    // 2. Commande !dmanonyme
-    if (content.startsWith('!dmanonyme')) {
+    if (content === '!vp') {
       let redeemed = await db.get(`SELECT * FROM redeemed_codes WHERE userId = ?`, [userId]);
       if (!redeemed) {
-        return message.reply('❌ Tu dois d’abord valider ton code secret en tapant `!code 2252` en étant niveau 120.');
+        return message.reply('❌ Accès refusé. Tu dois d’abord valider le code secret avec `!code [code]`.');
       }
 
-      const targetMention = message.mentions.users.first();
-      const text = content.replace('!dmanonyme', '').replace(/<@!?\d+>/, '').trim();
-
-      if (!targetMention || !text) {
-        return message.reply('❌ Format incorrect. Utilise : `!dmanonyme @Membre Ton message ici`');
-      }
-
-      try {
-        const anonEmbed = new EmbedBuilder()
-          .setColor('#9B59B6')
-          .setTitle('📩 Message Anonyme Reçu')
-          .setDescription(`> ${text}`)
-          .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
-        await targetMention.send({ embeds: [anonEmbed] });
-        return message.reply('✅ Message anonyme envoyé avec succès !');
-      } catch (e) {
-        return message.reply('❌ Impossible d’envoyer le message à cette personne.');
-      }
-    }
-
-    // 3. Commandes !vp ou !vocal en DM
-    if (content === '!vp' || content === '!vocal') {
-      // Vérifier si l'utilisateur est dans un serveur commun
       const mutualGuild = client.guilds.cache.find(g => g.members.cache.has(userId));
-      if (!mutualGuild) {
-        return message.reply('❌ Tu n’es dans aucun serveur avec ce bot.');
-      }
+      if (!mutualGuild) return message.reply('❌ Serveur introuvable.');
 
-      const voiceChannels = mutualGuild.channels.cache.filter(c => c.type === 2); // 2 = GuildVoice
-      if (voiceChannels.size === 0) {
-        return message.reply('❌ Aucun salon vocal trouvé sur le serveur.');
-      }
+      const voiceChannels = mutualGuild.channels.cache.filter(c => c.type === 2);
+      if (voiceChannels.size === 0) return message.reply('❌ Aucun salon vocal trouvé sur le serveur.');
 
-      // Création des boutons pour chaque salon vocal
       const row = new ActionRowBuilder();
-      let count = 1;
-      let descriptionList = [];
-
-      for (const [chanId, chan] of voiceChannels.entries()) {
-        if (count <= 5) { // Limite Discord de 5 boutons par ligne
-          row.addComponents(
-            new ButtonBuilder()
-              .setCustomId(`select_vc_${chanId}`)
-              .setLabel(`Salon ${count}`)
-              .setStyle(ButtonStyle.Primary)
-          );
-        }
-        descriptionList.push(`**Salon ${count}** : ${chan.name}`);
+      let count = 1, desc = [];
+      for (const [id, chan] of voiceChannels.entries()) {
+        if (count <= 5) row.addComponents(new ButtonBuilder().setCustomId(`vc_${id}`).setLabel(`Salon ${count}`).setStyle(ButtonStyle.Primary));
+        desc.push(`**Salon ${count}** : ${chan.name}`);
         count++;
       }
 
-      const embed = new EmbedBuilder()
-        .setColor('#3498DB')
-        .setTitle('🎙️ Sélection du Salon Vocal')
-        .setDescription('Voici la liste des salons vocaux disponibles sur le serveur. Clique sur le bouton correspondant pour le sécuriser :\n\n' + descriptionList.join('\n'))
-        .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
-
-      return message.reply({ embeds: [embed], components: [row] });
+      return message.reply({ 
+        embeds: [new EmbedBuilder().setColor('#3498DB').setTitle('🎙️ Sélection du Salon Vocal').setDescription(desc.join('\n')).setFooter({ text: `Créateur : ${CREATOR_NAME}` })], 
+        components: [row] 
+      });
     }
 
     return;
   }
 
-  // --- GESTION DE L'XP SUR LE SERVEUR ---
+  // Gain d'XP par message sur le serveur
   const userId = message.author.id;
   const guildId = message.guild.id;
 
@@ -295,74 +222,50 @@ client.on('messageCreate', async message => {
   }
 });
 
-// --- PROTECTION VOCALE ET GESTION DES SANCTIONS ---
+// --- PROTECTION VOCALE ---
 client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!newState.channelId) return;
-  const channelId = newState.channelId;
-  
-  if (lockedVoiceChannels.has(channelId)) {
-    const data = lockedVoiceChannels.get(channelId);
-    const member = newState.member;
-
-    if (member.id !== data.ownerId) {
-      try {
-        await member.voice.disconnect();
-        if (data.sanction) {
-          await member.timeout(60 * 1000, 'Tentative d’intrusion dans un salon vocal sécurisé').catch(() => {});
-        }
-      } catch (e) {}
-    }
+  const data = lockedVoiceChannels.get(newState.channelId);
+  if (data && newState.member.id !== data.ownerId) {
+    try {
+      await newState.member.voice.disconnect();
+      if (data.sanction) await newState.member.timeout(60 * 1000, 'Intrusion vocal privé').catch(() => {});
+    } catch (e) {}
   }
 });
 
-// --- GESTION DES INTERFACES ET BOUTONS EN DM ---
+// --- GESTION DES INTERACTIONS (BOUTONS EN DM & SLASH COMMANDS) ---
 client.on('interactionCreate', async interaction => {
-  // Gestion des boutons de sélection de salon vocal en DM
   if (interaction.isButton() && !interaction.guild) {
     const userId = interaction.user.id;
 
-    if (interaction.customId.startsWith('select_vc_')) {
-      const salonId = interaction.customId.replace('select_vc_', '');
+    if (interaction.customId.startsWith('vc_')) {
+      const salonId = interaction.customId.replace('vc_', '');
       pendingVoiceSetup.set(userId, salonId);
 
       const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('vc_nosanction').setLabel('Sans sanction').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('vc_sanction').setLabel('Avec sanction (1 min)').setStyle(ButtonStyle.Danger)
+        new ButtonBuilder().setCustomId('nosanction').setLabel('Sans sanction').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('sanction').setLabel('Avec sanction (1 min)').setStyle(ButtonStyle.Danger)
       );
 
-      const embed = new EmbedBuilder()
-        .setColor('#E74C3C')
-        .setTitle('🛡️ Option de Sécurité Vocale')
-        .setDescription('Choisis l’option de sanction pour les personnes qui essayeront de rejoindre ton salon vocal privé :')
-        .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
-
-      return interaction.update({ embeds: [embed], components: [row] });
+      return interaction.update({ 
+        embeds: [new EmbedBuilder().setColor('#E74C3C').setTitle('🛡️ Option de Sanction').setDescription('Choisis l’option pour les intrus :').setFooter({ text: `Créateur : ${CREATOR_NAME}` })], 
+        components: [row] 
+      });
     }
 
-    if (interaction.customId === 'vc_nosanction' || interaction.customId === 'vc_sanction') {
+    if (interaction.customId === 'nosanction' || interaction.customId === 'sanction') {
       const salonId = pendingVoiceSetup.get(userId);
-      if (!salonId) {
-        return interaction.update({ content: '❌ Session expirée. Recommence avec `!vp` en DM.', embeds: [], components: [] });
-      }
+      if (!salonId) return interaction.update({ content: '❌ Session expirée.', embeds: [], components: [] });
 
-      const hasSanction = interaction.customId === 'vc_sanction';
+      const hasSanction = interaction.customId === 'sanction';
       lockedVoiceChannels.set(salonId, { ownerId: userId, sanction: hasSanction });
       pendingVoiceSetup.delete(userId);
 
-      const mutualGuild = client.guilds.cache.find(g => g.channels.cache.has(salonId));
-      const channel = mutualGuild ? mutualGuild.channels.cache.get(salonId) : null;
-
-      const successEmbed = new EmbedBuilder()
-        .setColor('#2ECC71')
-        .setTitle('🔒 Salon Vocal Sécurisé')
-        .setDescription(`Ton salon **${channel ? channel.name : salonId}** est désormais privé !\nOption choisie : **${hasSanction ? 'Avec sanction (1 min d’exclusion)' : 'Sans sanction (Simple déconnexion)'}**`)
-        .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
-
-      return interaction.update({ embeds: [successEmbed], components: [] });
+      return interaction.update({ content: `✅ Salon vocal sécurisé avec succès ! (Sanction : ${hasSanction ? 'Oui' : 'Non'})`, embeds: [], components: [] });
     }
   }
 
-  // --- GESTION DES COMMANDES SLASH SUR LE SERVEUR ---
   if (!interaction.isChatInputCommand()) return;
   const guildId = interaction.guild ? interaction.guild.id : null;
   const userId = interaction.user.id;
@@ -465,16 +368,10 @@ client.on('interactionCreate', async interaction => {
 
   else if (commandName === 'resetlevel') {
     const target = interaction.options.getUser('membre');
-    let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [target.id, guildId]);
-    
-    if (!user) {
-      await db.run(`INSERT INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)`, [target.id, guildId]);
-    } else {
-      await db.run(`UPDATE users SET xp = 0, level = 0 WHERE userId = ? AND guildId = ?`, [target.id, guildId]);
-    }
-
+    await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)`, [target.id, guildId]);
     await interaction.reply({ content: `✅ Les niveaux et l'XP de <@${target.id}> ont été réinitialisés à zéro.`, ephemeral: true });
   }
 });
 
 client.login(process.env.DISCORD_TOKEN);
+      
