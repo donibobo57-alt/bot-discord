@@ -1,12 +1,15 @@
 {
   "name": "bot-discord",
   "version": "1.0.0",
-  "description": "Mon bot discord",
+  "description": "Bot Discord complet avec niveaux et boutique",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.1"
+    "canvas": "^2.11.2",
+    "discord.js": "^14.14.1",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7"
   }
 }
