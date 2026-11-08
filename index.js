@@ -31,7 +31,6 @@ async function applyLevelRoles(member, lvl) {
   } catch (e) {}
 }
 
-// Fonction d'ajout d'XP par message (avec notifications activées uniquement ici)
 async function addXpFromMessage(member, guildId, add, defChan) {
   let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [member.id, guildId]) || { xp: 0, level: 0 };
   let xp = u.xp + add, lvl = u.level, need = 100 + (lvl * 25);
@@ -73,14 +72,19 @@ client.on('messageCreate', async m => {
 
 client.on('voiceStateUpdate', async (oldS, newS) => {
   if (!newS.channelId || newS.member.user.bot || !db) return;
-  let b = await db.get(`SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'black' AND channelId IN (SELECT channelId FROM locks)`, [newS.channelId, newS.member.id]);
-  if (b) return newS.member.voice.disconnect().catch(() => {});
+  let b = await db.get(`SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'black'`, [newS.channelId, newS.member.id]);
+  if (b) {
+    await newS.member.voice.disconnect("Blacklisté de ce salon").catch(() => {});
+    return;
+  }
   let l = await db.get(`SELECT * FROM locks WHERE channelId = ?`, [newS.channelId]);
   if (!l || newS.member.id === l.ownerId) return;
   let a = await db.get(`SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'white'`, [newS.channelId, newS.member.id]);
   if (!a) {
-    newS.member.voice.disconnect().catch(() => {});
-    if (l.type === 'timeout') newS.member.timeout(60000, "Salon sécurisé").catch(() => {});
+    await newS.member.voice.disconnect("Salon verrouillé").catch(() => {});
+    if (l.type === 'timeout') {
+      await newS.member.timeout(60000, "Tentative d'intrusion dans un salon vocal verrouillé").catch(() => {});
+    }
   }
 });
 
@@ -98,7 +102,7 @@ client.on('interactionCreate', async i => {
       const row = new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder().setCustomId('v_sel').setPlaceholder('Choisis une action...').addOptions([
           { label: 'Verrouiller (Kick)', value: 'lock_kick', emoji: '🔒' },
-          { label: 'Verrouiller (Kick + Timeout)', value: 'lock_timeout', emoji: '⚡' },
+          { label: 'Verrouiller (Kick + Timeout 1 min)', value: 'lock_timeout', emoji: '⚡' },
           { label: 'Whitelist (Autoriser)', value: 'white', emoji: '✅' },
           { label: 'Blacklist (Bannir)', value: 'black', emoji: '⛔' },
           { label: 'Rendre Public (VPU)', value: 'public', emoji: '🔓' }
@@ -107,12 +111,24 @@ client.on('interactionCreate', async i => {
       return i.reply({ embeds: [new EmbedBuilder().setColor('#3498db').setTitle('🛡️ Centre Vocal').setDescription('Sélectionne une option :')], components: [row], ephemeral: true });
     }
 
-    // Gestion admin avec sanction rouge + timeout 1 min
+    // SANCTION STRICTE ADMIN : Embed rouge + Timeout 1 minute automatique
     if (['setsalon', 'addxp', 'setlevel', 'resetlevel'].includes(commandName)) {
       let isAdmin = i.member.permissions.has(PermissionFlagsBits.Administrator) || uId === i.guild.ownerId;
       if (!isAdmin) {
-        try { await i.member.timeout(60000, "Tentative d'utilisation d'une commande admin non autorisée").catch(() => {}); } catch(e){}
-        return i.reply({ embeds: [new EmbedBuilder().setColor('#FF0033').setTitle('🚨 ACCÈS REFUSÉ').setDescription(`Attention <@${uId}>, cette commande est réservée aux administrateurs.\n⚡ *Une restriction de 1 minute vous a été appliquée.*`).setFooter({ text: CREATOR })], ephemeral: true });
+        try { 
+          await i.member.timeout(60000, "Tentative d'utilisation non autorisée d'une commande administrative").catch(() => {}); 
+        } catch(e) {}
+        
+        return i.reply({ 
+          embeds: [
+            new EmbedBuilder()
+              .setColor('#FF0033')
+              .setTitle('🚨 ALERTE SÉCURITÉ • ACCÈS REFUSÉ')
+              .setDescription(`Attention <@${uId}>, cette commande est **strictement réservée aux administrateurs**.\n\n⚡ *Une sanction d'exclusion temporaire (timeout) d'une minute vous a été appliquée.*`)
+              .setFooter({ text: CREATOR })
+          ], 
+          ephemeral: true 
+        });
       }
     }
 
@@ -135,7 +151,6 @@ client.on('interactionCreate', async i => {
       return i.reply({ content: `✅ Salon défini sur <#${c.id}>.`, ephemeral: true });
     }
 
-    // Commandes admin d'XP / Niveau SANS AUCUN ENVOI DE NOTIFICATION DANS LE CHAT
     if (commandName === 'addxp') {
       let target = options.getUser('membre'), amt = options.getInteger('montant');
       let mem = await i.guild.members.fetch(target.id);
@@ -144,7 +159,7 @@ client.on('interactionCreate', async i => {
       while (xp >= need) { xp -= need; lvl++; need = 100 + (lvl * 25); }
       await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [target.id, gId, xp, lvl]);
       await applyLevelRoles(mem, lvl);
-      return i.reply({ content: `✅ Ajout discret de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}, aucun message envoyé).`, ephemeral: true });
+      return i.reply({ content: `✅ Ajout discret de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}).`, ephemeral: true });
     }
 
     if (commandName === 'setlevel') {
@@ -152,7 +167,7 @@ client.on('interactionCreate', async i => {
       let mem = await i.guild.members.fetch(target.id);
       await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, ?)`, [target.id, gId, lvl]);
       await applyLevelRoles(mem, lvl);
-      return i.reply({ content: `✅ Niveau de <@${target.id}> fixé à **${lvl}** (Discret, sans notification).`, ephemeral: true });
+      return i.reply({ content: `✅ Niveau de <@${target.id}> fixé à **${lvl}**.`, ephemeral: true });
     }
 
     if (commandName === 'resetlevel') {
@@ -160,7 +175,7 @@ client.on('interactionCreate', async i => {
       let mem = await i.guild.members.fetch(target.id);
       await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)`, [target.id, gId]);
       await applyLevelRoles(mem, 0);
-      return i.reply({ content: `✅ Progression de <@${target.id}> réinitialisée discrètement.`, ephemeral: true });
+      return i.reply({ content: `✅ Progression de <@${target.id}> réinitialisée.`, ephemeral: true });
     }
   }
 
@@ -171,7 +186,7 @@ client.on('interactionCreate', async i => {
     if (val === 'lock_kick' || val === 'lock_timeout') {
       let type = val === 'lock_kick' ? 'kick' : 'timeout';
       await db.run(`INSERT OR REPLACE INTO locks (channelId, ownerId, type) VALUES (?, ?, ?)`, [vChan.id, uId, type]);
-      return i.update({ content: `🔒 Salon verrouillé (${type}).`, embeds: [], components: [] });
+      return i.update({ content: `🔒 Salon verrouillé avec sanction (${type === 'timeout' ? 'Kick + Timeout' : 'Kick'}).`, embeds: [], components: [] });
     }
 
     if (val === 'white' || val === 'black') {
@@ -192,7 +207,10 @@ client.on('interactionCreate', async i => {
     if (i.customId.startsWith('sub_')) {
       let mode = i.customId.split('_')[1] === 'white' ? 'white' : 'black';
       await db.run(`INSERT OR REPLACE INTO access (channelId, userId, mode) VALUES (?, ?, ?)`, [vChan.id, i.values[0], mode]);
-      if (mode === 'black') vChan.members.get(i.values[0])?.voice.disconnect().catch(() => {});
+      if (mode === 'black') {
+        let targetMem = vChan.members.get(i.values[0]);
+        if (targetMem) await targetMem.voice.disconnect("Blacklisté de la vocale").catch(() => {});
+      }
       return i.update({ content: `✅ Action appliquée sur <@${i.values[0]}>.`, components: [] });
     }
   }
