@@ -2,377 +2,168 @@ const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Rout
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildVoiceStates
-  ]
-});
-
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates] });
 let db;
-const CREATOR_NAME = "bankiozi";
+const CREATOR = "bankiozi";
 
 async function initDB() {
-  try {
-    db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS users (userId TEXT, guildId TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 0, PRIMARY KEY (userId, guildId));
-      CREATE TABLE IF NOT EXISTS config (guildId TEXT PRIMARY KEY, notifChannelId TEXT);
-      CREATE TABLE IF NOT EXISTS locked_voices (channelId TEXT PRIMARY KEY, ownerId TEXT, sanctionType TEXT);
-      CREATE TABLE IF NOT EXISTS allowed_members (channelId TEXT, userId TEXT, PRIMARY KEY (channelId, userId));
-      CREATE TABLE IF NOT EXISTS blacklisted_members (channelId TEXT, userId TEXT, PRIMARY KEY (channelId, userId));
-    `);
-    console.log("📂 Base de données SQLite connectée avec succès !");
-  } catch (err) {
-    console.error("❌ Erreur critique base de données :", err);
-  }
+  db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS users (userId TEXT, guildId TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 0, PRIMARY KEY (userId, guildId));
+    CREATE TABLE IF NOT EXISTS config (guildId TEXT PRIMARY KEY, chanId TEXT);
+    CREATE TABLE IF NOT EXISTS locks (channelId TEXT PRIMARY KEY, ownerId TEXT, type TEXT);
+    CREATE TABLE IF NOT EXISTS access (channelId TEXT, userId TEXT, mode TEXT, PRIMARY KEY (channelId, userId, mode));
+  `);
 }
 
-// Fonction de gestion des rôles automatiques par palier
-async function checkAndApplyLevelRoles(member, newLevel, channel) {
-  if (!member || !member.guild) return;
-  const roleMap = { 10: 'Novice des messages', 30: 'Avancé des messages', 50: 'Semi-Pro message', 80: 'Légendaire des messages', 100: 'Légende du message' };
-  const allRoles = Object.values(roleMap);
-  const rolesToRemove = member.roles.cache.filter(r => allRoles.includes(r.name));
-
-  let targetName = null;
-  for (const [lvl, name] of Object.entries(roleMap)) {
-    if (newLevel >= parseInt(lvl)) targetName = name;
-  }
-
-  let targetRole = targetName ? member.guild.roles.cache.find(r => r.name === targetName) : null;
-  if (targetName && !targetRole) {
-    try { targetRole = await member.guild.roles.create({ name: targetName, color: '#5865F2' }); } catch (e) {}
-  }
-
-  try {
-    for (const r of rolesToRemove.values()) {
-      if (!targetRole || r.id !== targetRole.id) await member.roles.remove(r).catch(() => {});
-    }
-    if (targetRole && !member.roles.cache.has(targetRole.id)) await member.roles.add(targetRole).catch(() => {});
-  } catch (e) {}
-
-  if (channel) {
-    const embed = new EmbedBuilder()
-      .setColor('#00FFCC')
-      .setTitle('🎉 Montée de Niveau !')
-      .setDescription(`Félicitations <@${member.id}>, tu passes au **niveau ${newLevel}** ! 🚀`)
-      .setFooter({ text: `Créateur : ${CREATOR_NAME}` })
-      .setTimestamp();
-    channel.send({ embeds: [embed] }).catch(() => {});
-  }
-}
-
-// Enregistrement des commandes avec les anciens noms exacts
-const commands = [
-  new SlashCommandBuilder().setName('rank').setDescription('Afficher ton profil magnifique et ta progression XP'),
-  new SlashCommandBuilder().setName('leaderboard').setDescription('Afficher le classement global du serveur'),
-  new SlashCommandBuilder().setName('setsalon').setDescription('Définir le salon des annonces de niveau (Admin)').addChannelOption(o => o.setName('salon').setDescription('Salon cible').setRequired(true)),
-  new SlashCommandBuilder().setName('addxp').setDescription('Ajouter de l’XP à un membre (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('montant').setDescription('Quantité d’XP').setRequired(true)),
-  new SlashCommandBuilder().setName('setlevel').setDescription('Modifier le niveau d’un membre (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('niveau').setDescription('Niveau').setRequired(true)),
-  new SlashCommandBuilder().setName('resetlevel').setDescription('Réinitialiser le niveau d’un membre (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
-  new SlashCommandBuilder().setName('menu').setDescription('Panneau de gestion centralisé').addSubcommand(sub =>
-    sub.setName('vocal').setDescription('Gérer la sécurité de tes salons vocaux (Niveau 100+)')
-  )
+const cmds = [
+  new SlashCommandBuilder().setName('rank').setDescription('Afficher ton profil et ta progression XP'),
+  new SlashCommandBuilder().setName('leaderboard').setDescription('Afficher le classement du serveur'),
+  new SlashCommandBuilder().setName('setsalon').setDescription('Définir le salon des niveaux (Admin)').addChannelOption(o => o.setName('salon').setDescription('Salon').setRequired(true)),
+  new SlashCommandBuilder().setName('addxp').setDescription('Ajouter de l’XP (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('montant').setDescription('XP').setRequired(true)),
+  new SlashCommandBuilder().setName('setlevel').setDescription('Modifier le niveau (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('niveau').setDescription('Niveau').setRequired(true)),
+  new SlashCommandBuilder().setName('resetlevel').setDescription('Réinitialiser un membre (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
+  new SlashCommandBuilder().setName('menu').setDescription('Panneau de gestion').addSubcommand(s => s.setName('vocal').setDescription('Sécurité vocale (Niveau 100+)'))
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
   await initDB();
-  console.log(`🤖 Bot connecté et prêt : ${client.user.tag}`);
-  
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-  try {
-    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log("🔄 Commandes Slash synchronisées avec succès !");
-  } catch (e) {
-    console.error("❌ Erreur synchronisation commandes :", e);
-  }
-  
-  client.user.setPresence({ activities: [{ name: '/menu vocal | Sécurité 🛡️', type: 0 }], status: 'online' });
+  await rest.put(Routes.applicationCommands(client.user.id), { body: cmds });
+  client.user.setPresence({ activities: [{ name: '/menu vocal | 🛡️' }], status: 'online' });
 });
 
-// --- SYSTÈME D'XP ROBUSTE SUR LES MESSAGES ---
-client.on('messageCreate', async message => {
-  if (message.author.bot || !message.guild || !db) return;
-  const userId = message.author.id;
-  const guildId = message.guild.id;
-
-  let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, guildId]);
-
-  if (!user) {
-    await db.run(`INSERT INTO users (userId, guildId, xp, level) VALUES (?, ?, 15, 0)`, [userId, guildId]);
-  } else {
-    let newXp = user.xp + 15;
-    let newLevel = user.level;
-    let xpNeeded = 100 + (newLevel * 25);
-    let config = await db.get(`SELECT * FROM config WHERE guildId = ?`, [guildId]);
-    let targetChannel = config && config.notifChannelId ? message.guild.channels.cache.get(config.notifChannelId) : message.channel;
-
-    while (newXp >= xpNeeded) {
-      newXp -= xpNeeded;
-      newLevel += 1;
-      xpNeeded = 100 + (newLevel * 25);
-      await checkAndApplyLevelRoles(message.member, newLevel, targetChannel);
-    }
-    await db.run(`UPDATE users SET xp = ?, level = ? WHERE userId = ? AND guildId = ?`, [newXp, newLevel, userId, guildId]);
-  }
-});
-
-// --- SURVEILLANCE VOCALE ET SÉCURITÉ ---
-client.on('voiceStateUpdate', async (oldState, newState) => {
-  if (!newState.channelId || newState.member.user.bot || !db) return;
-  const channelId = newState.channelId;
-  const member = newState.member;
-
-  const blacklisted = await db.get(`SELECT * FROM blacklisted_members WHERE channelId = ? AND userId = ?`, [channelId, member.id]);
-  if (blacklisted) {
-    try { await member.voice.disconnect("Tu es blacklisté de ce salon vocal"); } catch (e) {}
+client.on('messageCreate', async m => {
+  if (m.author.bot || !m.guild || !db) return;
+  let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [m.author.id, m.guild.id]);
+  if (!u) {
+    await db.run(`INSERT INTO users (userId, guildId, xp, level) VALUES (?, ?, 15, 0)`, [m.author.id, m.guild.id]);
     return;
   }
-
-  const lock = await db.get(`SELECT * FROM locked_voices WHERE channelId = ?`, [channelId]);
-  if (!lock) return;
-
-  if (member.id === lock.ownerId) return;
-  const allowed = await db.get(`SELECT * FROM allowed_members WHERE channelId = ? AND userId = ?`, [channelId, member.id]);
-  if (allowed) return;
-
-  try {
-    await member.voice.disconnect("Salon vocal sécurisé et verrouillé");
-    if (lock.sanctionType === 'timeout') {
-      await member.timeout(60 * 1000, "Tentative d'accès non autorisée à un salon vocal verrouillé");
-    }
-  } catch (e) {}
+  let xp = u.xp + 15, lvl = u.level, need = 100 + (lvl * 25);
+  if (xp >= need) { xp -= need; lvl++; }
+  await db.run(`UPDATE users SET xp = ?, level = ? WHERE userId = ? AND guildId = ?`, [xp, lvl, m.author.id, m.guild.id]);
 });
 
-// --- GESTION DES INTERACTIONS ---
-client.on('interactionCreate', async interaction => {
-  try {
-    if (!db) {
-      if (interaction.isRepliable()) {
-        return await interaction.reply({ content: '❌ Erreur : Base de données en cours de chargement, réessaie dans un instant.', ephemeral: true });
-      }
-      return;
+client.on('voiceStateUpdate', async (oldS, newS) => {
+  if (!newS.channelId || newS.member.user.bot || !db) return;
+  let b = await db.get(`SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'black'`, [newS.channelId, newS.member.id]);
+  if (b) return newS.member.voice.disconnect().catch(() => {});
+  
+  let l = await db.get(`SELECT * FROM locks WHERE channelId = ?`, [newS.channelId]);
+  if (!l || newS.member.id === l.ownerId) return;
+  let a = await db.get(`SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'white'`, [newS.channelId, newS.member.id]);
+  if (!a) {
+    await newS.member.voice.disconnect().catch(() => {});
+    if (l.type === 'timeout') await newS.member.timeout(60000, "Salon sécurisé").catch(() => {});
+  }
+});
+
+client.on('interactionCreate', async i => {
+  if (!db) return;
+  const gId = i.guild?.id, uId = i.user.id;
+
+  if (i.isChatInputCommand()) {
+    const { commandName, options } = i;
+
+    if (commandName === 'menu' && options.getSubcommand() === 'vocal') {
+      let u = await db.get(`SELECT level FROM users WHERE userId = ? AND guildId = ?`, [uId, gId]);
+      if (!u || u.level < 100) return i.reply({ content: `⛔ Niveau **100** requis (Ton niveau : ${u ? u.level : 0}).`, ephemeral: true });
+      
+      const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder().setCustomId('v_sel').setPlaceholder('Choisis une action...').addOptions([
+          { label: 'Verrouiller (Kick)', value: 'lock_kick', emoji: '🔒' },
+          { label: 'Verrouiller (Kick + Timeout)', value: 'lock_timeout', emoji: '⚡' },
+          { label: 'Whitelist (Autoriser)', value: 'white', emoji: '✅' },
+          { label: 'Blacklist (Bannir)', value: 'black', emoji: '⛔' },
+          { label: 'Rendre Public (VPU)', value: 'public', emoji: '🔓' }
+        ])
+      );
+      return i.reply({ embeds: [new EmbedBuilder().setColor('#3498db').setTitle('🛡️ Centre Vocal').setDescription('Sélectionne une option ci-dessous :')], components: [row], ephemeral: true });
     }
 
-    const guildId = interaction.guild ? interaction.guild.id : null;
-    const userId = interaction.user.id;
-
-    if (interaction.isChatInputCommand()) {
-      const { commandName, options } = interaction;
-
-      // Commande /menu vocal
-      if (commandName === 'menu' && options.getSubcommand() === 'vocal') {
-        let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, guildId]);
-        const currentLevel = user ? user.level : 0;
-
-        if (currentLevel < 100) {
-          const embed = new EmbedBuilder()
-            .setColor('#E74C3C')
-            .setTitle('⛔ Accès Restreint')
-            .setDescription(`Il te faut être minimum **niveau 100** pour utiliser le panneau vocal.\nTon niveau actuel : **${currentLevel}** 📊`)
-            .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
-          return await interaction.reply({ embeds: [embed], ephemeral: true });
-        }
-
-        const embed = new EmbedBuilder()
-          .setColor('#3498DB')
-          .setTitle('🛡️ Centre de Contrôle Vocal Sécurisé')
-          .setDescription('Sélectionne l\'action de sécurité que tu souhaites exécuter via le menu déroulant ci-dessous :')
-          .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
-
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('vocal_menu_select')
-            .setPlaceholder('Choisis une option de gestion...')
-            .addOptions([
-              { label: 'Verrouiller (Kick instantané)', description: 'Sécuriser une vocale', value: 'lock_kick', emoji: '🔒' },
-              { label: 'Verrouiller (Kick + Timeout)', description: 'Sécuriser une vocale avec sanction', value: 'lock_timeout', emoji: '⚡' },
-              { label: 'Whitelist (Autoriser un membre)', description: 'Donner l’accès à un ami sur ta vocale', value: 'whitelist_add', emoji: '✅' },
-              { label: 'Blacklist (Bannir un membre de ta vocale)', description: 'Interdire l’accès à quelqu’un', value: 'blacklist_add', emoji: '⛔' },
-              { label: 'Rendre public (VPU)', description: 'Retirer le verrouillage de ton salon', value: 'make_public', emoji: '🔓' }
-            ])
-        );
-
-        return await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
-      }
-
-      // Sécurité Admin
-      const adminCommands = ['setsalon', 'addxp', 'setlevel', 'resetlevel'];
-      if (adminCommands.includes(commandName)) {
-        const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator) || userId === interaction.guild.ownerId;
-        if (!isAdmin) {
-          return await interaction.reply({ content: '❌ **Sécurité :** Accès refusé. Réservé aux administrateurs.', ephemeral: true });
-        }
-      }
-
-      // Commande /rank (Profil magnifique et détaillé)
-      if (commandName === 'rank') {
-        let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, guildId]) || { xp: 0, level: 0 };
-        let xpNeeded = 100 + (user.level * 25);
-        let percentage = Math.min(Math.floor((user.xp / xpNeeded) * 100), 100);
-        let progressBar = '█'.repeat(Math.floor(percentage / 10)) + '░'.repeat(10 - Math.floor(percentage / 10));
-
-        const embed = new EmbedBuilder()
-          .setColor('#5865F2')
-          .setTitle(`🌟 Profil de Progression — ${interaction.user.username}`)
-          .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true, size: 512 }))
-          .addFields(
-            { name: '🎖️ Niveau Actuel', value: `\`\`\`fix\nNiveau ${user.level}\`\`\``, inline: true },
-            { name: '✨ Expérience XP', value: `\`\`\`ini\n[ ${user.xp} / ${xpNeeded} XP ]\`\`\``, inline: true },
-            { name: '📈 Barre d’Évolution', value: `\`${progressBar}\` **${percentage}%**`, inline: false }
-          )
-          .setFooter({ text: `Créateur : ${CREATOR_NAME} • Système actif`, iconURL: interaction.client.user.displayAvatarURL() })
-          .setTimestamp();
-
-        return await interaction.reply({ embeds: [embed] });
-      } 
-
-      // Commande /leaderboard
-      else if (commandName === 'leaderboard') {
-        const top = await db.all(`SELECT * FROM users WHERE guildId = ? ORDER BY level DESC, xp DESC LIMIT 5`, [guildId]);
-        let desc = top && top.length > 0 ? top.map((u, i) => `**#${i + 1}** <@${u.userId}> — Niveau **${u.level}** (${u.xp} XP)`).join('\n') : 'Aucun classement disponible pour le moment.';
-        
-        const embed = new EmbedBuilder()
-          .setColor('#FFD700')
-          .setTitle('🏆 Classement Global des Légendes')
-          .setDescription(desc)
-          .setFooter({ text: `Créateur : ${CREATOR_NAME}` })
-          .setTimestamp();
-        return await interaction.reply({ embeds: [embed] });
-      } 
-
-      else if (commandName === 'setsalon') {
-        const channel = options.getChannel('salon');
-        await db.run(`INSERT OR REPLACE INTO config (guildId, notifChannelId) VALUES (?, ?)`, [guildId, channel.id]);
-        return await interaction.reply({ content: `✅ Salon des notifications défini avec succès sur <#${channel.id}> !`, ephemeral: true });
-      } 
-
-      else if (commandName === 'addxp') {
-        const target = options.getUser('membre');
-        const amount = options.getInteger('montant');
-        let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [target.id, guildId]) || { xp: 0, level: 0 };
-        let newXp = user.xp + amount, newLevel = user.level, xpNeeded = 100 + (newLevel * 25);
-        while (newXp >= xpNeeded) {
-          newXp -= xpNeeded;
-          newLevel += 1;
-          xpNeeded = 100 + (newLevel * 25);
-        }
-        await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [target.id, guildId, newXp, newLevel]);
-        return await interaction.reply({ content: `✅ Ajout de **${amount} XP** à <@${target.id}> (Niveau actuel : ${newLevel}).`, ephemeral: true });
-      } 
-
-      else if (commandName === 'setlevel') {
-        const target = options.getUser('membre');
-        const lvl = options.getInteger('niveau');
-        await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, ?)`, [target.id, guildId, lvl]);
-        return await interaction.reply({ content: `✅ Le niveau de <@${target.id}> a été fixé à **${lvl}**.`, ephemeral: true });
-      } 
-
-      else if (commandName === 'resetlevel') {
-        const target = options.getUser('membre');
-        await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)`, [target.id, guildId]);
-        return await interaction.reply({ content: `✅ La progression de <@${target.id}> a été réinitialisée.`, ephemeral: true });
-      }
+    if (['setsalon', 'addxp', 'setlevel', 'resetlevel'].includes(commandName) && !i.member.permissions.has(PermissionFlagsBits.Administrator) && uId !== i.guild.ownerId) {
+      return i.reply({ content: '❌ Réservé aux administrateurs.', ephemeral: true });
     }
 
-    // Gestion des Menus Déroulants Vocaux
-    else if (interaction.isStringSelectMenu()) {
-      if (interaction.customId === 'vocal_menu_select') {
-        const choice = interaction.values[0];
-        const memberVoice = interaction.member.voice.channel;
+    if (commandName === 'rank') {
+      let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [uId, gId]) || { xp: 0, level: 0 };
+      let need = 100 + (u.level * 25), pct = Math.min(Math.floor((u.xp / need) * 100), 100);
+      let bar = '█'.repeat(Math.floor(pct / 10)) + '░'.repeat(10 - Math.floor(pct / 10));
+      
+      const embed = new EmbedBuilder()
+        .setColor('#5865F2')
+        .setTitle(`🌟 Profil de ${i.user.username}`)
+        .setThumbnail(i.user.displayAvatarURL())
+        .addFields(
+          { name: '🎖️ Niveau', value: `\`\`\`fix\nNiveau ${u.level}\`\`\``, inline: true },
+          { name: '✨ Expérience', value: `\`\`\`ini\n[ ${u.xp} / ${need} XP ]\`\`\``, inline: true },
+          { name: '📈 Progression', value: `\`${bar}\` **${pct}%**`, inline: false }
+        )
+        .setFooter({ text: `Créateur : ${CREATOR}` });
+      return i.reply({ embeds: [embed] });
+    }
 
-        if (!memberVoice && choice !== 'make_public') {
-          return await interaction.reply({ content: `❌ **Erreur :** Tu dois être connecté dans un salon vocal pour effectuer cette action.`, ephemeral: true });
-        }
+    if (commandName === 'leaderboard') {
+      let top = await db.all(`SELECT * FROM users WHERE guildId = ? ORDER BY level DESC, xp DESC LIMIT 5`, [gId]);
+      let desc = top.length ? top.map((x, idx) => `**#${idx + 1}** <@${x.userId}> — Niveau **${x.level}**`).join('\n') : 'Aucun classement.';
+      return i.reply({ embeds: [new EmbedBuilder().setColor('#FFD700').setTitle('🏆 Classement Global').setDescription(desc).setFooter({ text: CREATOR })] });
+    }
 
-        if (choice === 'lock_kick' || choice === 'lock_timeout') {
-          const sanctionType = choice === 'lock_kick' ? 'kick' : 'timeout';
-          await db.run(`INSERT OR REPLACE INTO locked_voices (channelId, ownerId, sanctionType) VALUES (?, ?, ?)`, [memberVoice.id, userId, sanctionType]);
-          
-          const embed = new EmbedBuilder()
-            .setColor('#E67E22')
-            .setTitle('🔒 Salon Vocal Verrouillé')
-            .setDescription(`Le salon **${memberVoice.name}** est sécurisé.\n• Sanction : **${sanctionType === 'timeout' ? 'Kick + Timeout 1 min' : 'Kick instantané'}**`)
-            .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
-          return await interaction.update({ embeds: [embed], components: [] });
-        }
+    if (commandName === 'setsalon') {
+      let c = options.getChannel('salon');
+      await db.run(`INSERT OR REPLACE INTO config (guildId, chanId) VALUES (?, ?)`, [gId, c.id]);
+      return i.reply({ content: `✅ Salon défini sur <#${c.id}>.`, ephemeral: true });
+    }
 
-        if (choice === 'whitelist_add' || choice === 'blacklist_add') {
-          const lock = await db.get(`SELECT * FROM locked_voices WHERE channelId = ?`, [memberVoice.id]);
-          if (!lock || lock.ownerId !== userId) {
-            return await interaction.reply({ content: `❌ **Refusé :** Tu ne possèdes pas de verrouillage actif sur ton salon vocal.`, ephemeral: true });
-          }
+    if (commandName === 'addxp' || commandName === 'setlevel' || commandName === 'resetlevel') {
+      let target = options.getUser('membre');
+      let u = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [target.id, gId]) || { xp: 0, level: 0 };
+      let xp = u.xp, lvl = u.level;
 
-          const membersInVoice = memberVoice.members.filter(m => m.id !== userId);
-          if (membersInVoice.size === 0) {
-            return await interaction.reply({ content: `❌ Aucun autre membre n'est présent dans ton salon vocal.`, ephemeral: true });
-          }
+      if (commandName === 'addxp') xp += options.getInteger('montant');
+      if (commandName === 'setlevel') lvl = options.getInteger('niveau');
+      if (commandName === 'resetlevel') { xp = 0; lvl = 0; }
 
-          const selectMenuId = choice === 'whitelist_add' ? 'whitelist_member_select' : 'blacklist_member_select';
-          const selectMember = new StringSelectMenuBuilder()
-            .setCustomId(selectMenuId)
-            .setPlaceholder('Sélectionne le membre...')
-            .addOptions(membersInVoice.map(m => ({ label: m.user.username.slice(0, 25), value: m.id })));
+      await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [target.id, gId, xp, lvl]);
+      return i.reply({ content: `✅ Modification enregistrée pour <@${target.id}>.`, ephemeral: true });
+    }
+  }
 
-          const row = new ActionRowBuilder().addComponents(selectMember);
-          const embed = new EmbedBuilder()
-            .setColor(choice === 'whitelist_add' ? '#2ECC71' : '#E74C3C')
-            .setTitle(choice === 'whitelist_add' ? '✅ Gestion de la Whitelist' : '⛔ Gestion de la Blacklist')
-            .setDescription('Sélectionne le membre concerné :');
-          return await interaction.update({ embeds: [embed], components: [row] });
-        }
+  if (i.isStringSelectMenu()) {
+    let val = i.values[0], vChan = i.member.voice.channel;
+    if (!vChan && val !== 'public') return i.reply({ content: '❌ Connecte-toi à un salon vocal.', ephemeral: true });
 
-        if (choice === 'make_public') {
-          const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator) || userId === interaction.guild.ownerId;
-          let locks = isAdmin ? await db.all(`SELECT * FROM locked_voices`) : await db.all(`SELECT * FROM locked_voices WHERE ownerId = ?`, [userId]);
+    if (val === 'lock_kick' || val === 'lock_timeout') {
+      let type = val === 'lock_kick' ? 'kick' : 'timeout';
+      await db.run(`INSERT OR REPLACE INTO locks (channelId, ownerId, type) VALUES (?, ?, ?)`, [vChan.id, uId, type]);
+      return i.update({ content: `🔒 Salon verrouillé (${type}).`, embeds: [], components: [] });
+    }
 
-          if (!locks || locks.length === 0) {
-            return await interaction.reply({ content: `❌ Aucun salon verrouillé sous ton contrôle n'a été trouvé.`, ephemeral: true });
-          }
+    if (val === 'white' || val === 'black') {
+      let l = await db.get(`SELECT * FROM locks WHERE channelId = ? AND ownerId = ?`, [vChan.id, uId]);
+      if (!l) return i.reply({ content: '❌ Tu ne possèdes pas ce salon.', ephemeral: true });
+      let members = vChan.members.filter(m => m.id !== uId);
+      if (!members.size) return i.reply({ content: '❌ Personne d’autre dans le salon.', ephemeral: false });
 
-          const selectVoice = new StringSelectMenuBuilder()
-            .setCustomId('public_voice_select')
-            .setPlaceholder('Sélectionne le salon à rendre public...')
-            .addOptions(locks.map(l => ({ label: `Salon ID: ${l.channelId.slice(0, 15)}`, value: l.channelId })));
+      let menu = new StringSelectMenuBuilder().setCustomId(`sub_${val}`).setPlaceholder('Choisis un membre...').addOptions(members.map(m => ({ label: m.user.username.slice(0, 25), value: m.id })));
+      return i.update({ content: 'Sélectionne le membre :', components: [new ActionRowBuilder().addComponents(menu)] });
+    }
 
-          const row = new ActionRowBuilder().addComponents(selectVoice);
-          const embed = new EmbedBuilder().setColor('#2ECC71').setTitle('🔓 Rendre un salon Public (VPU)').setDescription('Sélectionne le salon vocal à déverrouiller :');
-          return await interaction.update({ embeds: [embed], components: [row] });
-        }
-      }
+    if (val === 'public') {
+      await db.run(`DELETE FROM locks WHERE channelId = ? OR ownerId = ?`, [vChan?.id || '', uId]);
+      await db.run(`DELETE FROM access WHERE channelId = ?`, [vChan?.id || '']);
+      return i.update({ content: `🔓 Salon rendu public.`, embeds: [], components: [] });
+    }
 
-      if (interaction.customId === 'whitelist_member_select') {
-        const targetUserId = interaction.values[0];
-        const memberVoice = interaction.member.voice.channel;
-        if (!memberVoice) return await interaction.reply({ content: `❌ Action expirée.`, ephemeral: true });
+    if (i.customId.startsWith('sub_')) {
+      let mode = i.customId.split('_')[1] === 'white' ? 'white' : 'black';
+      await db.run(`INSERT OR REPLACE INTO access (channelId, userId, mode) VALUES (?, ?, ?)`, [vChan.id, i.values[0], mode]);
+      if (mode === 'black') vChan.members.get(i.values[0])?.voice.disconnect().catch(() => {});
+      return i.update({ content: `✅ Action appliquée sur <@${i.values[0]}>.`, components: [] });
+    }
+  }
+});
 
-        await db.run(`INSERT OR IGNORE INTO allowed_members (channelId, userId) VALUES (?, ?)`, [memberVoice.id, targetUserId]);
-        const embed = new EmbedBuilder().setColor('#2ECC71').setTitle('✅ Membre Whitelisté').setDescription(`Le membre <@${targetUserId}> a été autorisé à rejoindre ta vocale.`);
-        return await interaction.update({ embeds: [embed], components: [] });
-      }
+client.login(process.env.DISCORD_TOKEN);
 
-      if (interaction.customId === 'blacklist_member_select') {
-        const targetUserId = interaction.values[0];
-        const memberVoice = interaction.member.voice.channel;
-        if (!memberVoice) return await interaction.reply({ content: `❌ Action expirée.`, ephemeral: true });
-
-        await db.run(`INSERT OR IGNORE INTO blacklisted_members (channelId, userId) VALUES (?, ?)`, [memberVoice.id, targetUserId]);
-        
-        try {
-          const targetMember = await interaction.guild.members.fetch(targetUserId);
-          if (targetMember && targetMember.voice.channelId === memberVoice.id) {
-            await targetMember.voice.disconnect("Tu es blacklisté de ce salon vocal");
-          }
-        } catch (e) {}
-
-        const embed = new EmbedBuilder().setColor('#E74C3C').setTitle('⛔ Membre Blacklisté').setDescription(`Le membre <@${targetUserId}> a été banni de ton salon vocal.`);
-        return await interaction.update({ embeds: [embed], components: [] });
-      }
-
-      if (interaction.customId === 'public_voice_select') {
-        const channelIdToUnlock = interaction.values[0];
-        const lock = await db.get(`SELECT 
