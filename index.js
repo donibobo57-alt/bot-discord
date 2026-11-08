@@ -14,14 +14,12 @@ const client = new Client({
 
 let db;
 const CREATOR_NAME = "bankiozi";
-const roleSetupState = new Map(); // userId -> channelId pour le panel de niveau 120
 
 async function initDB() {
   db = await open({ filename: './database.sqlite', driver: sqlite3.Database });
   await db.exec(`
     CREATE TABLE IF NOT EXISTS users (userId TEXT, guildId TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 0, PRIMARY KEY (userId, guildId));
     CREATE TABLE IF NOT EXISTS config (guildId TEXT PRIMARY KEY, notifChannelId TEXT);
-    CREATE TABLE IF NOT EXISTS custom_roles (userId TEXT PRIMARY KEY, roleId TEXT, deleted INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS locked_voices (channelId TEXT PRIMARY KEY, ownerId TEXT, sanctionType TEXT);
     CREATE TABLE IF NOT EXISTS allowed_members (channelId TEXT, userId TEXT, PRIMARY KEY (channelId, userId));
     CREATE TABLE IF NOT EXISTS blacklisted_members (channelId TEXT, userId TEXT, PRIMARY KEY (channelId, userId));
@@ -55,36 +53,11 @@ async function checkAndApplyLevelRoles(member, newLevel, channel) {
   if (channel) {
     const embed = new EmbedBuilder()
       .setColor('#00FFCC')
-      .setTitle('🎉 Montée de Niveau Exceptionnelle !')
-      .setDescription(`Félicitations <@${member.id}>, tu viens d'atteindre le palier du **niveau ${newLevel}** ! 🚀`)
-      .setFooter({ text: `Système exclusif • Créateur : ${CREATOR_NAME}` })
+      .setTitle('🎉 Montée de Niveau !')
+      .setDescription(`Félicitations <@${member.id}>, tu viens d'atteindre le **niveau ${newLevel}** ! 🚀`)
+      .setFooter({ text: `Créateur : ${CREATOR_NAME}` })
       .setTimestamp();
     channel.send({ embeds: [embed] }).catch(() => {});
-  }
-
-  if (newLevel === 120) {
-    try {
-      const guild = member.guild;
-      const privateChan = await guild.channels.create({
-        name: `role-${member.user.username}`,
-        type: ChannelType.GuildText,
-        permissionOverwrites: [
-          { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-          { id: member.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-          { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
-        ]
-      });
-
-      roleSetupState.set(member.id, privateChan.id);
-      
-      const embed = new EmbedBuilder()
-        .setColor('#9B59B6')
-        .setTitle('👑 Espace Privilège - Niveau 120 Atteint')
-        .setDescription(`Bienvenue dans ton salon personnel, <@${member.id}> !\n\nTu peux dès à présent configurer ton **rôle personnalisé unique**.\n\nÉcris ton message dans ce salon en respectant strictement ce format :\n\`Pseudo | #CouleurHEX | Permission\`\n\n**Options :**\n• **M** = Mute | **D** = Déplacer | **MC** = Mute Casque | **A** = Aucune *(ou en cas de faute de frappe)*`)
-        .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
-
-      await privateChan.send({ embeds: [embed] });
-    } catch (e) {}
   }
 }
 
@@ -105,68 +78,15 @@ client.once('ready', async () => {
   console.log(`Bot connecté avec succès : ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try { await rest.put(Routes.applicationCommands(client.user.id), { body: commands }); } catch (e) {}
-  client.user.setPresence({ activities: [{ name: '/menu vocal | Sécurité & Rôles 🛡️', type: 0 }], status: 'online' });
+  client.user.setPresence({ activities: [{ name: '/menu vocal | Sécurité 🛡️', type: 0 }], status: 'online' });
 });
 
+// --- GESTION DES MESSAGES (XP) ---
 client.on('messageCreate', async message => {
-  if (message.author.bot) return;
+  if (message.author.bot || !message.guild) return;
   const userId = message.author.id;
-
-  if (roleSetupState.has(userId) && message.channel.id === roleSetupState.get(userId)) {
-    let existingRecord = await db.get(`SELECT * FROM custom_roles WHERE userId = ?`, [userId]);
-    if (existingRecord) {
-      await message.channel.send(`❌ **Action impossible :** Tu possèdes déjà un rôle personnalisé.`);
-      setTimeout(() => message.channel.delete().catch(() => {}), 4000);
-      roleSetupState.delete(userId);
-      return;
-    }
-
-    const parts = message.content.split('|').map(p => p.trim());
-    if (parts.length < 3) {
-      const errEmbed = new EmbedBuilder().setColor('#E74C3C').setTitle('❌ Erreur de Format').setDescription('Format attendu :\n`Pseudo | #CouleurHEX | M, D, MC ou A`');
-      return message.channel.send({ embeds: [errEmbed] });
-    }
-
-    const roleName = parts[0];
-    let roleColor = parts[1];
-    if (!roleColor.startsWith('#')) roleColor = '#' + roleColor;
-    const permChoice = parts[2].toUpperCase();
-
-    let rolePermissions = [];
-    if (permChoice === 'M') rolePermissions.push(PermissionFlagsBits.MuteMembers);
-    else if (permChoice === 'D') rolePermissions.push(PermissionFlagsBits.MoveMembers);
-    else if (permChoice === 'MC') rolePermissions.push(PermissionFlagsBits.DeafenMembers);
-
-    try {
-      const createdRole = await message.guild.roles.create({
-        name: roleName,
-        color: roleColor,
-        permissions: rolePermissions,
-        reason: `Rôle exclusif niveau 120 généré par ${userId}`
-      });
-
-      await message.member.roles.add(createdRole);
-      await db.run(`INSERT OR REPLACE INTO custom_roles (userId, roleId, deleted) VALUES (?, ?, 0)`, [userId, createdRole.id]);
-
-      const successEmbed = new EmbedBuilder()
-        .setColor('#2ECC71')
-        .setTitle('✨ Rôle Exclusif Créé avec Succès !')
-        .setDescription(`Ton rôle **${roleName}** a été appliqué à ton profil.\n*Ce salon va s'autodétruire dans 5 secondes...*`)
-        .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
-
-      await message.channel.send({ embeds: [successEmbed] });
-      roleSetupState.delete(userId);
-      setTimeout(() => message.channel.delete().catch(() => {}), 5000);
-    } catch (e) {
-      await message.channel.send(`❌ **Erreur technique :** Impossible de créer le rôle (vérifie la couleur). Salon fermé.`);
-      roleSetupState.delete(userId);
-      setTimeout(() => message.channel.delete().catch(() => {}), 5000);
-    }
-    return;
-  }
-
-  if (!message.guild) return;
   const guildId = message.guild.id;
+
   let user = await db.get(`SELECT * FROM users WHERE userId = ? AND guildId = ?`, [userId, guildId]);
 
   if (!user) {
@@ -188,12 +108,12 @@ client.on('messageCreate', async message => {
   }
 });
 
+// --- SURVEILLANCE VOCALE ET SANCTIONS ---
 client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!newState.channelId || newState.member.user.bot) return;
   const channelId = newState.channelId;
   const member = newState.member;
 
-  // 1. Vérifier si l'utilisateur est blacklisté de ce salon vocal précis
   const blacklisted = await db.get(`SELECT * FROM blacklisted_members WHERE channelId = ? AND userId = ?`, [channelId, member.id]);
   if (blacklisted) {
     try { await member.voice.disconnect("Tu es blacklisté de ce salon vocal"); } catch (e) {}
@@ -215,6 +135,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   } catch (e) {}
 });
 
+// --- GESTION DES INTERACTIONS ---
 client.on('interactionCreate', async interaction => {
   if (interaction.isChatInputCommand()) {
     const guildId = interaction.guild ? interaction.guild.id : null;
@@ -260,7 +181,7 @@ client.on('interactionCreate', async interaction => {
     if (adminCommands.includes(commandName)) {
       const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator) || interaction.user.id === interaction.guild.ownerId;
       if (!isAdmin) {
-        try { await interaction.member.timeout(60 * 1000, "Tentative d'utilisation de commande admin non autorisée"); } catch (e) {}
+        try { await interaction.member.timeout(60 * 1000, "Non autorisé"); } catch (e) {}
         return interaction.reply({ content: '❌ **Sécurité :** Accès refusé. Réservé aux administrateurs.', ephemeral: true });
       }
     }
@@ -292,7 +213,7 @@ client.on('interactionCreate', async interaction => {
       let config = await db.get(`SELECT * FROM config WHERE guildId = ?`, [guildId]);
       if (!config) await db.run(`INSERT INTO config (guildId, notifChannelId) VALUES (?, ?)`, [guildId, channel.id]);
       else await db.run(`UPDATE config SET notifChannelId = ? WHERE guildId = ?`, [channel.id, guildId]);
-      await interaction.reply({ content: `✅ Salon des notifications défini avec succès sur <#${channel.id}> !`, ephemeral: true });
+      await interaction.reply({ content: `✅ Salon des notifications défini sur <#${channel.id}> !`, ephemeral: true });
     } else if (commandName === 'addxp') {
       const target = interaction.options.getUser('membre');
       const amount = interaction.options.getInteger('montant');
@@ -300,16 +221,16 @@ client.on('interactionCreate', async interaction => {
       let newXp = user.xp + amount, newLevel = user.level, xpNeeded = 100 + (newLevel * 25);
       while (newXp >= xpNeeded) { newXp -= xpNeeded; newLevel += 1; xpNeeded = 100 + (newLevel * 25); }
       await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [target.id, guildId, newXp, newLevel]);
-      await interaction.reply({ content: `✅ Ajout de **${amount} XP** à <@${target.id}> (Niveau atteint : ${newLevel}).`, ephemeral: true });
+      await interaction.reply({ content: `✅ Ajout de **${amount} XP** à <@${target.id}> (Niveau : ${newLevel}).`, ephemeral: true });
     } else if (commandName === 'setlevel') {
       const target = interaction.options.getUser('membre');
       const lvl = interaction.options.getInteger('niveau');
-      await db.run(`INSERT OR REPLACE INTO users (usersId, guildId, xp, level) VALUES (?, ?, 0, ?)`, [target.id, guildId, lvl]);
-      await interaction.reply({ content: `✅ Niveau de <@${target.id}> fixé directement à **${lvl}**.`, ephemeral: true });
+      await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, ?)`, [target.id, guildId, lvl]);
+      await interaction.reply({ content: `✅ Niveau de <@${target.id}> fixé à **${lvl}**.`, ephemeral: true });
     } else if (commandName === 'resetlevel') {
       const target = interaction.options.getUser('membre');
       await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)`, [target.id, guildId]);
-      await interaction.reply({ content: `✅ Progression de <@${target.id}> réinitialisée à zéro.`, ephemeral: true });
+      await interaction.reply({ content: `✅ Progression de <@${target.id}> réinitialisée.`, ephemeral: true });
     }
   }
 
@@ -318,7 +239,7 @@ client.on('interactionCreate', async interaction => {
     const memberVoice = interaction.member.voice.channel;
 
     if (!memberVoice && choice !== 'make_public') {
-      return interaction.update({ content: `❌ **Erreur :** Tu dois obligatoirement être connecté dans un salon vocal pour effectuer cette action.`, embeds: [], components: [] });
+      return interaction.update({ content: `❌ **Erreur :** Tu dois être connecté dans un salon vocal pour effectuer cette action.`, embeds: [], components: [] });
     }
 
     if (choice === 'lock_kick' || choice === 'lock_timeout') {
@@ -328,7 +249,7 @@ client.on('interactionCreate', async interaction => {
       const embed = new EmbedBuilder()
         .setColor('#E67E22')
         .setTitle('🔒 Salon Vocal Verrouillé')
-        .setDescription(`Le salon **${memberVoice.name}** est désormais sécurisé.\n• Sanction appliquée : **${sanctionType === 'timeout' ? 'Kick + Timeout 1 min' : 'Kick instantané'}**`)
+        .setDescription(`Le salon **${memberVoice.name}** est sécurisé.\n• Sanction : **${sanctionType === 'timeout' ? 'Kick + Timeout 1 min' : 'Kick instantané'}**`)
         .setFooter({ text: `Créateur : ${CREATOR_NAME}` });
       return interaction.update({ embeds: [embed], components: [] });
     }
@@ -336,7 +257,7 @@ client.on('interactionCreate', async interaction => {
     if (choice === 'whitelist_add' || choice === 'blacklist_add') {
       const lock = await db.get(`SELECT * FROM locked_voices WHERE channelId = ?`, [memberVoice.id]);
       if (!lock || lock.ownerId !== interaction.user.id) {
-        return interaction.update({ content: `❌ **Refusé :** Tu ne possèdes pas de verrouillage actif sur ton salon vocal actuel.`, embeds: [], components: [] });
+        return interaction.update({ content: `❌ **Refusé :** Tu ne possèdes pas de verrouillage actif sur ton salon vocal.`, embeds: [], components: [] });
       }
 
       const membersInVoice = memberVoice.members.filter(m => m.id !== interaction.user.id);
@@ -354,10 +275,77 @@ client.on('interactionCreate', async interaction => {
       const embed = new EmbedBuilder()
         .setColor(choice === 'whitelist_add' ? '#2ECC71' : '#E74C3C')
         .setTitle(choice === 'whitelist_add' ? '✅ Gestion de la Whitelist' : '⛔ Gestion de la Blacklist')
-        .setDescription('Sélectionne le membre concerné dans la liste ci-dessous :');
+        .setDescription('Sélectionne le membre concerné :');
       return interaction.update({ embeds: [embed], components: [row] });
     }
 
     if (choice === 'make_public') {
       const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator) || interaction.user.id === interaction.guild.ownerId;
-      let locks = isAdmin ? await db.all(`SELECT * FROM locked_voices`) : await db.all(`SELE
+      let locks = isAdmin ? await db.all(`SELECT * FROM locked_voices`) : await db.all(`SELECT * FROM locked_voices WHERE ownerId = ?`, [interaction.user.id]);
+
+      if (!locks || locks.length === 0) {
+        return interaction.update({ content: `❌ Aucun salon verrouillé sous ton contrôle n'a été trouvé.`, embeds: [], components: [] });
+      }
+
+      const selectVoice = new StringSelectMenuBuilder()
+        .setCustomId('public_voice_select')
+        .setPlaceholder('Sélectionne le salon à rendre public...')
+        .addOptions(locks.map(l => ({ label: `Salon ID: ${l.channelId.slice(0, 8)}...`, value: l.channelId })));
+
+      const row = new ActionRowBuilder().addComponents(selectVoice);
+      const embed = new EmbedBuilder().setColor('#2ECC71').setTitle('🔓 Rendre un salon Public (VPU)').setDescription('Sélectionne le salon vocal à déverrouiller :');
+      return interaction.update({ embeds: [embed], components: [row] });
+    }
+  }
+
+  else if (interaction.isStringSelectMenu()) {
+    if (interaction.customId === 'whitelist_member_select') {
+      const targetUserId = interaction.values[0];
+      const memberVoice = interaction.member.voice.channel;
+      if (!memberVoice) return interaction.update({ content: `❌ Action expirée.`, embeds: [], components: [] });
+
+      await db.run(`INSERT OR IGNORE INTO allowed_members (channelId, userId) VALUES (?, ?)`, [memberVoice.id, targetUserId]);
+      const embed = new EmbedBuilder().setColor('#2ECC71').setTitle('✅ Membre Whitelisteé').setDescription(`Le membre <@${targetUserId}> a été autorisé à rejoindre ta vocale.`);
+      return interaction.update({ embeds: [embed], components: [] });
+    }
+
+    if (interaction.customId === 'blacklist_member_select') {
+      const targetUserId = interaction.values[0];
+      const memberVoice = interaction.member.voice.channel;
+      if (!memberVoice) return interaction.update({ content: `❌ Action expirée.`, embeds: [], components: [] });
+
+      await db.run(`INSERT OR IGNORE INTO blacklisted_members (channelId, userId) VALUES (?, ?)`, [memberVoice.id, targetUserId]);
+      
+      try {
+        const targetMember = await interaction.guild.members.fetch(targetUserId);
+        if (targetMember && targetMember.voice.channelId === memberVoice.id) {
+          await targetMember.voice.disconnect("Tu as été blacklisté de ce salon vocal");
+        }
+      } catch (e) {}
+
+      const embed = new EmbedBuilder().setColor('#E74C3C').setTitle('⛔ Membre Blacklisté').setDescription(`Le membre <@${targetUserId}> a été banni de ton salon vocal.`);
+      return interaction.update({ embeds: [embed], components: [] });
+    }
+
+    if (interaction.customId === 'public_voice_select') {
+      const channelIdToUnlock = interaction.values[0];
+      const lock = await db.get(`SELECT * FROM locked_voices WHERE channelId = ?`, [channelIdToUnlock]);
+      if (!lock) return interaction.update({ content: `❌ Ce salon n'est plus verrouillé.`, embeds: [], components: [] });
+
+      const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator) || interaction.user.id === interaction.guild.ownerId;
+      if (lock.ownerId !== interaction.user.id && !isAdmin) {
+        return interaction.update({ content: `❌ **Sécurité :** Tu n'es pas le propriétaire de ce verrouillage et tu n'es pas admin.`, embeds: [], components: [] });
+      }
+
+      await db.run(`DELETE FROM locked_voices WHERE channelId = ?`, [channelIdToUnlock]);
+      await db.run(`DELETE FROM allowed_members WHERE channelId = ?`, [channelIdToUnlock]);
+      await db.run(`DELETE FROM blacklisted_members WHERE channelId = ?`, [channelIdToUnlock]);
+
+      const embed = new EmbedBuilder().setColor('#2ECC71').setTitle('🔓 Salon Public (VPU)').setDescription(`Le salon vocal a été rendu public avec succès.`);
+      return interaction.update({ embeds: [embed], components: [] });
+    }
+  }
+});
+
+client.login(process.env.DISCORD_TOKEN);
+                                   
