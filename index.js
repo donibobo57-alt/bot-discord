@@ -55,6 +55,7 @@ const cmds = [
   new SlashCommandBuilder().setName('addxp').setDescription('Ajouter de l’XP (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('montant').setDescription('XP').setRequired(true)),
   new SlashCommandBuilder().setName('setlevel').setDescription('Modifier le niveau (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addIntegerOption(o => o.setName('niveau').setDescription('Niveau').setRequired(true)),
   new SlashCommandBuilder().setName('resetlevel').setDescription('Réinitialiser (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)),
+  new SlashCommandBuilder().setName('less').setDescription('Renommer un membre (Admin)').addUserOption(o => o.setName('membre').setDescription('Membre').setRequired(true)).addStringOption(o => o.setName('nouveau_nom').setDescription('Nouveau pseudo').setRequired(true)),
   new SlashCommandBuilder().setName('menu').setDescription('Centre de contrôle').addSubcommand(s => s.setName('vocal').setDescription('Sécurité vocale (Niveau 100+)'))
 ].map(c => c.toJSON());
 
@@ -84,7 +85,9 @@ client.on('voiceStateUpdate', async (oldS, newS) => {
   if (!a) {
     await newS.member.voice.disconnect("Salon verrouillé").catch(() => {});
     if (l.type === 'timeout') {
-      await newS.member.timeout(60000, "Tentative d'intrusion dans un salon vocal verrouillé").catch(() => {});
+      try {
+        await newS.member.timeout(60000, "Tentative d'intrusion dans un salon vocal verrouillé");
+      } catch (e) {}
     }
   }
 });
@@ -112,12 +115,16 @@ client.on('interactionCreate', async i => {
       return i.reply({ embeds: [new EmbedBuilder().setColor('#3498db').setTitle('🛡️ Centre Vocal').setDescription('Sélectionne une option :')], components: [row], ephemeral: true });
     }
 
-    if (['setsalon', 'addxp', 'setlevel', 'resetlevel'].includes(commandName)) {
+    // Gestion Sécurité Admin avec application garantie du Timeout
+    if (['setsalon', 'addxp', 'setlevel', 'resetlevel', 'less'].includes(commandName)) {
       let isAdmin = i.member.permissions.has(PermissionFlagsBits.Administrator) || uId === i.guild.ownerId;
       if (!isAdmin) {
-        try { await i.member.timeout(60000, "Tentative d'utilisation non autorisée d'une commande administrative").catch(() => {}); } catch(e) {}
+        try { 
+          await i.member.timeout(60000, "Tentative d'utilisation non autorisée d'une commande administrative"); 
+        } catch(e) {}
+        
         return i.reply({ 
-          embeds: [new EmbedBuilder().setColor('#FF0033').setTitle('🚨 ACCÈS REFUSÉ').setDescription(`Attention <@${uId}>, cette commande est réservée aux administrateurs.\n⚡ *Une exclusion de 1 minute vous a été appliquée.*`).setFooter({ text: CREATOR })], 
+          embeds: [new EmbedBuilder().setColor('#FF0033').setTitle('🚨 ACCÈS REFUSÉ').setDescription(`Attention <@${uId}>, cette commande est réservée aux administrateurs.\n⚡ *Une exclusion temporaire (timeout) de 1 minute vous a été appliquée.*`).setFooter({ text: CREATOR })], 
           ephemeral: true 
         });
       }
@@ -168,6 +175,18 @@ client.on('interactionCreate', async i => {
       await applyLevelRoles(mem, 0);
       return i.reply({ content: `✅ Progression de <@${target.id}> réinitialisée.`, ephemeral: true });
     }
+
+    if (commandName === 'less') {
+      let target = options.getUser('membre');
+      let newName = options.getString('nouveau_nom');
+      let mem = await i.guild.members.fetch(target.id);
+      try {
+        await mem.setNickname(newName);
+        return i.reply({ content: `✨ Le pseudo de <@${target.id}> a été modifié avec succès en **${newName}** !`, ephemeral: true });
+      } catch (e) {
+        return i.reply({ content: `❌ Erreur : Je ne peux pas modifier le pseudo de ce membre (Vérifie les permissions du bot ou la hiérarchie des rôles).`, ephemeral: true });
+      }
+    }
   }
 
   if (i.isStringSelectMenu()) {
@@ -177,7 +196,7 @@ client.on('interactionCreate', async i => {
     if (val === 'lock_kick' || val === 'lock_timeout') {
       let type = val === 'lock_kick' ? 'kick' : 'timeout';
       await db.run(`INSERT OR REPLACE INTO locks (channelId, ownerId, type) VALUES (?, ?, ?)`, [vChan.id, uId, type]);
-      return i.update({ content: `🔒 Salon verrouillé (${type}).`, embeds: [], components: [] });
+      return i.update({ content: `🔒 Salon verrouillé (${type === 'timeout' ? 'Kick + Timeout 1 min' : 'Kick'}).`, embeds: [], components: [] });
     }
 
     if (val === 'white' || val === 'black') {
@@ -208,3 +227,4 @@ client.on('interactionCreate', async i => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
+           
