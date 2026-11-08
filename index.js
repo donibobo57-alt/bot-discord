@@ -60,6 +60,7 @@ const cmds = [
 
 client.once('ready', async () => {
   await initDB();
+  console.log(`🤖 Bot connecté : ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   await rest.put(Routes.applicationCommands(client.user.id), { body: cmds });
   client.user.setPresence({ activities: [{ name: '/menu vocal | 🛡️' }], status: 'online' });
@@ -111,22 +112,12 @@ client.on('interactionCreate', async i => {
       return i.reply({ embeds: [new EmbedBuilder().setColor('#3498db').setTitle('🛡️ Centre Vocal').setDescription('Sélectionne une option :')], components: [row], ephemeral: true });
     }
 
-    // SANCTION STRICTE ADMIN : Embed rouge + Timeout 1 minute automatique
     if (['setsalon', 'addxp', 'setlevel', 'resetlevel'].includes(commandName)) {
       let isAdmin = i.member.permissions.has(PermissionFlagsBits.Administrator) || uId === i.guild.ownerId;
       if (!isAdmin) {
-        try { 
-          await i.member.timeout(60000, "Tentative d'utilisation non autorisée d'une commande administrative").catch(() => {}); 
-        } catch(e) {}
-        
+        try { await i.member.timeout(60000, "Tentative d'utilisation non autorisée d'une commande administrative").catch(() => {}); } catch(e) {}
         return i.reply({ 
-          embeds: [
-            new EmbedBuilder()
-              .setColor('#FF0033')
-              .setTitle('🚨 ALERTE SÉCURITÉ • ACCÈS REFUSÉ')
-              .setDescription(`Attention <@${uId}>, cette commande est **strictement réservée aux administrateurs**.\n\n⚡ *Une sanction d'exclusion temporaire (timeout) d'une minute vous a été appliquée.*`)
-              .setFooter({ text: CREATOR })
-          ], 
+          embeds: [new EmbedBuilder().setColor('#FF0033').setTitle('🚨 ACCÈS REFUSÉ').setDescription(`Attention <@${uId}>, cette commande est réservée aux administrateurs.\n⚡ *Une exclusion de 1 minute vous a été appliquée.*`).setFooter({ text: CREATOR })], 
           ephemeral: true 
         });
       }
@@ -159,7 +150,7 @@ client.on('interactionCreate', async i => {
       while (xp >= need) { xp -= need; lvl++; need = 100 + (lvl * 25); }
       await db.run(`INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)`, [target.id, gId, xp, lvl]);
       await applyLevelRoles(mem, lvl);
-      return i.reply({ content: `✅ Ajout discret de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}).`, ephemeral: true });
+      return i.reply({ content: `✅ Ajout de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}).`, ephemeral: true });
     }
 
     if (commandName === 'setlevel') {
@@ -186,7 +177,7 @@ client.on('interactionCreate', async i => {
     if (val === 'lock_kick' || val === 'lock_timeout') {
       let type = val === 'lock_kick' ? 'kick' : 'timeout';
       await db.run(`INSERT OR REPLACE INTO locks (channelId, ownerId, type) VALUES (?, ?, ?)`, [vChan.id, uId, type]);
-      return i.update({ content: `🔒 Salon verrouillé avec sanction (${type === 'timeout' ? 'Kick + Timeout' : 'Kick'}).`, embeds: [], components: [] });
+      return i.update({ content: `🔒 Salon verrouillé (${type}).`, embeds: [], components: [] });
     }
 
     if (val === 'white' || val === 'black') {
