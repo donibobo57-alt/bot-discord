@@ -9,38 +9,32 @@ const {
   Routes,
   PermissionFlagsBits,
   ActionRowBuilder,
-  StringSelectMenuBuilder
+  StringSelectMenuBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ChannelType
 } = require('discord.js');
 
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 
-// ==============================
-// SERVEUR HTTP RENDER
-// ==============================
-
-const server = http.createServer((req, res) => {
-  if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ status: 'online' }));
-  }
-
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Discord Bot is running!');
-});
-
 const PORT = process.env.PORT || 3000;
-
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[HTTP] Serveur actif sur le port ${PORT}`);
-});
-
-// ==============================
-// CONFIGURATION
-// ==============================
-
+const TOKEN = process.env.DISCORD_TOKEN;
 const CREATOR = 'bankiozi';
 const MAX_LEVEL = 120;
+const XP_PER_MESSAGE = 15;
+const chronoIntervals = new Map();
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Bot is active and running!');
+});
+server.listen(PORT, () => console.log(`[HTTP] Port ${PORT}`));
+
+if (!TOKEN) {
+  console.error('DISCORD_TOKEN manquant !');
+  process.exit(1);
+}
 
 const client = new Client({
   intents: [
@@ -54,10 +48,6 @@ const client = new Client({
 
 let db;
 
-// ==============================
-// BASE DE DONNÉES
-// ==============================
-
 async function initDB() {
   db = await open({
     filename: './database.sqlite',
@@ -65,8 +55,6 @@ async function initDB() {
   });
 
   await db.exec(`
-    PRAGMA journal_mode = WAL;
-
     CREATE TABLE IF NOT EXISTS users (
       userId TEXT,
       guildId TEXT,
@@ -92,19 +80,31 @@ async function initDB() {
       mode TEXT,
       PRIMARY KEY (channelId, userId, mode)
     );
-  `);
 
-  console.log('[DATABASE] Base de données prête');
+    CREATE TABLE IF NOT EXISTS chronometers (
+      messageId TEXT PRIMARY KEY,
+      guildId TEXT,
+      channelId TEXT,
+      ownerId TEXT,
+      elapsedMs INTEGER DEFAULT 0,
+      startedAt INTEGER,
+      status TEXT DEFAULT 'idle'
+    );
+  `);
 }
 
-// ==============================
-// COMMANDES DISCORD
-// ==============================
+const commands = [
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Afficher toutes les commandes'),
 
-const cmds = [
+  new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Vérifier la latence du bot'),
+
   new SlashCommandBuilder()
     .setName('rank')
-    .setDescription('Ton profil et XP'),
+    .setDescription('Afficher ton profil et ton XP'),
 
   new SlashCommandBuilder()
     .setName('leaderboard')
@@ -112,200 +112,290 @@ const cmds = [
 
   new SlashCommandBuilder()
     .setName('setsalon')
-    .setDescription('Salon des niveaux (Admin)')
+    .setDescription('Définir le salon des niveaux')
     .addChannelOption(o =>
       o.setName('salon')
-        .setDescription('Salon')
+        .setDescription('Salon des notifications')
+        .addChannelTypes(ChannelType.GuildText)
         .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName('addxp')
-    .setDescription('Ajouter de l’XP (Admin)')
+    .setDescription('Ajouter de l XP')
     .addUserOption(o =>
-      o.setName('membre')
-        .setDescription('Membre')
-        .setRequired(true)
-    )
+      o.setName('membre').setDescription('Membre').setRequired(true))
     .addIntegerOption(o =>
-      o.setName('montant')
-        .setDescription('XP à ajouter')
-        .setMinValue(1)
-        .setMaxValue(1000000)
-        .setRequired(true)
-    ),
+      o.setName('montant').setDescription('Montant XP')
+        .setMinValue(1).setMaxValue(1000000).setRequired(true)),
 
   new SlashCommandBuilder()
     .setName('setlevel')
-    .setDescription('Modifier le niveau (Admin)')
+    .setDescription('Modifier un niveau')
     .addUserOption(o =>
-      o.setName('membre')
-        .setDescription('Membre')
-        .setRequired(true)
-    )
+      o.setName('membre').setDescription('Membre').setRequired(true))
     .addIntegerOption(o =>
-      o.setName('niveau')
-        .setDescription('Niveau entre 0 et 120')
-        .setMinValue(0)
-        .setMaxValue(MAX_LEVEL)
-        .setRequired(true)
-    ),
+      o.setName('niveau').setDescription('Niveau entre 0 et 120')
+        .setMinValue(0).setMaxValue(MAX_LEVEL).setRequired(true)),
 
   new SlashCommandBuilder()
     .setName('resetlevel')
-    .setDescription('Réinitialiser (Admin)')
+    .setDescription('Réinitialiser un niveau')
     .addUserOption(o =>
-      o.setName('membre')
-        .setDescription('Membre')
-        .setRequired(true)
-    ),
+      o.setName('membre').setDescription('Membre').setRequired(true)),
 
   new SlashCommandBuilder()
     .setName('menu')
     .setDescription('Centre de contrôle')
     .addSubcommand(s =>
-      s.setName('vocal')
-        .setDescription('Sécurité vocale (Niveau 100+)')
-    )
+      s.setName('vocal').setDescription('Sécurité vocale niveau 100+')),
+
+  new SlashCommandBuilder()
+    .setName('chronometre')
+    .setDescription('Ouvrir le chronomètre administrateur')
 ].map(c => c.toJSON());
 
-// ==============================
-// VÉRIFICATION ADMIN
-// ==============================
-
 function isAdmin(i) {
-  return (
-    i.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
-    i.user.id === i.guild.ownerId
-  );
+  return i.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+    i.guild?.ownerId === i.user.id;
 }
 
-// ==============================
-// CONNEXION DISCORD
-// ==============================
+function formatTime(ms) {
+  const total = Math.floor(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+
+  return [h, m, s]
+    .map(n => String(n).padStart(2, '0'))
+    .join(':');
+}
+
+function getElapsed(row) {
+  let elapsed = Number(row.elapsedMs || 0);
+
+  if (row.status === 'running' && row.startedAt) {
+    elapsed += Date.now() - Number(row.startedAt);
+  }
+
+  return Math.max(0, elapsed);
+}
+
+function chronoPayload(row) {
+  const running = row.status === 'running';
+  const paused = row.status === 'paused';
+  const stopped = row.status === 'stopped';
+
+  const status = running ? 'En cours' :
+    paused ? 'En pause' :
+    stopped ? 'Arrêté' : 'En attente';
+
+  const embed = new EmbedBuilder()
+    .setColor(running ? '#00CC99' : paused ? '#FFA500' : '#5865F2')
+    .setTitle('⏱️ CHRONOMÈTRE')
+    .setDescription(
+      `\`\`\`\n${formatTime(getElapsed(row))}\n\`\`\``
+    )
+    .addFields({
+      name: 'État',
+      value: `**${status}**`,
+      inline: true
+    })
+    .setFooter({ text: CREATOR });
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('chrono_start')
+      .setLabel('Démarrer')
+      .setEmoji('▶️')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(running || paused),
+
+    new ButtonBuilder()
+      .setCustomId('chrono_pause')
+      .setLabel('Pause')
+      .setEmoji('⏸️')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!running),
+
+    new ButtonBuilder()
+      .setCustomId('chrono_resume')
+      .setLabel('Reprendre')
+      .setEmoji('⏯️')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(!paused)
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('chrono_stop')
+      .setLabel('Arrêter')
+      .setEmoji('⏹️')
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!running && !paused),
+
+    new ButtonBuilder()
+      .setCustomId('chrono_display')
+      .setLabel('Afficher')
+      .setEmoji('👁️')
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  return { embeds: [embed], components: [row1, row2] };
+}
+
+// Actualisation du chronomètre toutes les 5 secondes.
+function startChronoUpdater(messageId, channelId) {
+  if (chronoIntervals.has(messageId)) return;
+
+  const interval = setInterval(async () => {
+    try {
+      const row = await db.get(
+        'SELECT * FROM chronometers WHERE messageId = ?',
+        [messageId]
+      );
+
+      if (!row || row.status !== 'running') {
+        clearInterval(interval);
+        chronoIntervals.delete(messageId);
+        return;
+      }
+
+      const channel = await client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased()) return;
+
+      const message = await channel.messages.fetch(messageId);
+      await message.edit(chronoPayload(row));
+
+    } catch (err) {
+      console.error('[CHRONO UPDATE]', err.message);
+    }
+  }, 5000);
+
+  chronoIntervals.set(messageId, interval);
+}
+
+async function restoreChronometers() {
+  const rows = await db.all(
+    "SELECT * FROM chronometers WHERE status = 'running'"
+  );
+
+  for (const row of rows) {
+    startChronoUpdater(row.messageId, row.channelId);
+  }
+
+  console.log(`[CHRONO] ${rows.length} chronomètre(s) restauré(s).`);
+}
 
 client.once('ready', async () => {
-  console.log(`[DISCORD] Connecté : ${client.user.tag}`);
-
   try {
-    const rest = new REST({ version: '10' })
-      .setToken(process.env.DISCORD_TOKEN);
+    await initDB();
+
+    console.log(`Bot connecté : ${client.user.tag}`);
+
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
 
     await rest.put(
       Routes.applicationCommands(client.user.id),
-      { body: cmds }
+      { body: commands }
     );
 
-    console.log('[COMMANDS] Commandes synchronisées');
+    console.log('Commandes slash synchronisées.');
 
     client.user.setPresence({
-      activities: [{ name: '/menu vocal | 🛡️' }],
+      activities: [{ name: '/help | /chronometre' }],
       status: 'online'
     });
 
+    await restoreChronometers();
+
   } catch (err) {
-    console.error('[COMMANDS ERROR]', err);
+    console.error('[READY]', err);
   }
 });
 
-client.on('error', err => {
-  console.error('[DISCORD ERROR]', err);
-});
-
-// ==============================
-// SYSTÈME XP
-// ==============================
-
-client.on('messageCreate', async m => {
+// Système XP
+client.on('messageCreate', async message => {
   try {
-    if (m.author.bot || !m.guild || !db) return;
+    if (message.author.bot || !message.guild || !db) return;
 
-    let u = await db.get(
+    let user = await db.get(
       'SELECT * FROM users WHERE userId = ? AND guildId = ?',
-      [m.author.id, m.guild.id]
+      [message.author.id, message.guild.id]
     );
 
-    if (!u) {
+    if (!user) {
       await db.run(
         'INSERT INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)',
-        [m.author.id, m.guild.id]
+        [message.author.id, message.guild.id]
       );
-
-      u = { xp: 0, level: 0 };
+      user = { xp: 0, level: 0 };
     }
 
-    if (u.level >= MAX_LEVEL) return;
+    if (user.level >= MAX_LEVEL) return;
 
-    let xp = u.xp + 15;
-    let lvl = u.level;
-    let need = 100 + (lvl * 25);
+    let xp = user.xp + XP_PER_MESSAGE;
+    let level = user.level;
 
-    if (xp >= need) {
-      xp -= need;
-      lvl++;
+    while (level < MAX_LEVEL) {
+      const needed = 100 + level * 25;
+      if (xp < needed) break;
 
-      if (lvl >= MAX_LEVEL) {
-        lvl = MAX_LEVEL;
-        xp = 0;
-      }
-
-      let cfg = await db.get(
-        'SELECT chanId FROM config WHERE guildId = ?',
-        [m.guild.id]
-      );
-
-      let chan = cfg
-        ? m.guild.channels.cache.get(cfg.chanId) || m.channel
-        : m.channel;
-
-      if (chan) {
-        await chan.send({
-          embeds: [
-            new EmbedBuilder()
-              .setColor('#00FFCC')
-              .setTitle('🎉 NOUVEAU NIVEAU !')
-              .setDescription(
-                `Félicitations <@${m.author.id}>, tu passes au **niveau ${lvl}** ! 🚀`
-              )
-              .setFooter({ text: CREATOR })
-          ]
-        }).catch(() => {});
-      }
+      xp -= needed;
+      level++;
     }
+
+    if (level >= MAX_LEVEL) xp = 0;
 
     await db.run(
       'UPDATE users SET xp = ?, level = ? WHERE userId = ? AND guildId = ?',
-      [xp, lvl, m.author.id, m.guild.id]
+      [xp, level, message.author.id, message.guild.id]
     );
 
+    if (level > user.level) {
+      const cfg = await db.get(
+        'SELECT chanId FROM config WHERE guildId = ?',
+        [message.guild.id]
+      );
+
+      const channel = cfg
+        ? message.guild.channels.cache.get(cfg.chanId) || message.channel
+        : message.channel;
+
+      await channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor('#00FFCC')
+            .setTitle('🎉 NOUVEAU NIVEAU !')
+            .setDescription(
+              `Félicitations <@${message.author.id}>, tu passes au **niveau ${level}** !`
+            )
+            .setFooter({ text: CREATOR })
+        ]
+      }).catch(() => {});
+    }
+
   } catch (err) {
-    console.error('[XP ERROR]', err);
+    console.error('[XP]', err);
   }
 });
 
-// ==============================
-// SÉCURITÉ VOCALE
-// ==============================
-
-client.on('voiceStateUpdate', async (oldS, newS) => {
+// Sécurité vocale
+client.on('voiceStateUpdate', async (oldState, newState) => {
   try {
-    if (!newS.channelId || !newS.member || !db) return;
+    if (!db || !newState.channelId || !newState.member ||
+        newState.member.user.bot) return;
 
-    // Ignorer les changements qui ne sont pas une entrée ou un déplacement.
-    if (oldS.channelId === newS.channelId) return;
-
-    if (newS.member.user.bot) return;
-
-    const channelId = newS.channelId;
-    const memberId = newS.member.id;
+    const channelId = newState.channelId;
+    const member = newState.member;
 
     const black = await db.get(
       "SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'black'",
-      [channelId, memberId]
+      [channelId, member.id]
     );
 
     if (black) {
-      await newS.member.voice.disconnect('Blacklisté de ce salon').catch(() => {});
+      await member.voice.disconnect('Blacklisté de ce salon');
       return;
     }
 
@@ -314,487 +404,351 @@ client.on('voiceStateUpdate', async (oldS, newS) => {
       [channelId]
     );
 
-    if (!lock || memberId === lock.ownerId) return;
+    if (!lock || lock.ownerId === member.id) return;
 
     const white = await db.get(
       "SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'white'",
-      [channelId, memberId]
+      [channelId, member.id]
     );
 
     if (white) return;
 
-    await newS.member.voice.disconnect('Salon verrouillé').catch(() => {});
+    await member.voice.disconnect('Salon verrouillé');
 
     if (lock.type === 'timeout') {
-      await newS.member.timeout(
+      await member.timeout(
         60000,
-        'Tentative d’intrusion dans un salon vocal verrouillé'
+        'Tentative d’accès à un salon vocal verrouillé'
       ).catch(() => {});
     }
 
   } catch (err) {
-    console.error('[VOICE ERROR]', err);
+    console.error('[VOICE]', err);
   }
 });
 
-// ==============================
-// INTERACTIONS
-// ==============================
-
+// Interactions
 client.on('interactionCreate', async i => {
-  if (!i.guild || !db) return;
-
-  const gId = i.guild.id;
-  const uId = i.user.id;
-
   try {
+    if (!db || !i.guild) {
+      if (i.isRepliable()) {
+        await i.reply({
+          content: 'Le bot initialise encore sa base de données.',
+          ephemeral: true
+        }).catch(() => {});
+      }
+      return;
+    }
 
-    // --------------------------
-    // COMMANDES
-    // --------------------------
+    const guildId = i.guild.id;
+    const userId = i.user.id;
 
+    // COMMANDES SLASH
     if (i.isChatInputCommand()) {
-      const { commandName, options } = i;
+      const command = i.commandName;
+      const options = i.options;
 
+      // Commandes administrateur
       const adminCommands = [
-        'setsalon',
-        'addxp',
-        'setlevel',
-        'resetlevel'
+        'setsalon', 'addxp', 'setlevel',
+        'resetlevel', 'chronometre'
       ];
 
-      const ephemeral =
-        adminCommands.includes(commandName) ||
-        commandName === 'menu';
-
-      await i.deferReply({ ephemeral });
-
-      if (adminCommands.includes(commandName) && !isAdmin(i)) {
-        return i.editReply({
-          embeds: [
-            new EmbedBuilder()
-              .setColor('#FF0033')
-              .setTitle('🚨 ACCÈS REFUSÉ')
-              .setDescription(
-                'Cette commande est réservée aux administrateurs.'
-              )
-              .setFooter({ text: CREATOR })
-          ]
+      if (adminCommands.includes(command) && !isAdmin(i)) {
+        return i.reply({
+          content: '⛔ Cette commande est réservée aux administrateurs.',
+          ephemeral: true
         });
       }
 
-      // RANK
+      // Ping
+      if (command === 'ping') {
+        await i.deferReply({ ephemeral: true });
 
-      if (commandName === 'rank') {
-        let u = await db.get(
+        return i.editReply(
+          `🏓 Pong ! Latence : **${client.ws.ping} ms**`
+        );
+      }
+
+      // Help
+      if (command === 'help') {
+        await i.deferReply({ ephemeral: true });
+
+        const embed = new EmbedBuilder()
+          .setColor('#5865F2')
+          .setTitle('📖 CENTRE DES COMMANDES')
+          .setDescription('Voici toutes les commandes disponibles.')
+          .addFields(
+            {
+              name: '👤 Commandes membres',
+              value:
+                '`/rank` — Ton profil et ta progression\n' +
+                '`/leaderboard` — Classement du serveur\n' +
+                '`/ping` — Latence du bot\n' +
+                '`/help` — Liste des commandes'
+            },
+            {
+              name: '🛡️ Commandes administrateur',
+              value:
+                '`/setsalon` — Salon des niveaux\n' +
+                '`/addxp` — Ajouter de l’XP\n' +
+                '`/setlevel` — Modifier un niveau\n' +
+                '`/resetlevel` — Réinitialiser un niveau\n' +
+                '`/chronometre` — Chronomètre interactif'
+            },
+            {
+              name: '🔊 Sécurité vocale',
+              value:
+                '`/menu vocal` — Centre de contrôle vocal (niveau 100+)'
+            }
+          )
+          .setFooter({ text: CREATOR });
+
+        return i.editReply({ embeds: [embed] });
+      }
+
+      // Rank
+      if (command === 'rank') {
+        await i.deferReply();
+
+        let user = await db.get(
           'SELECT * FROM users WHERE userId = ? AND guildId = ?',
-          [uId, gId]
+          [userId, guildId]
         );
 
-        if (!u) {
+        if (!user) {
+          user = { xp: 0, level: 0 };
+
           await db.run(
             'INSERT INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)',
-            [uId, gId]
+            [userId, guildId]
           );
-
-          u = { xp: 0, level: 0 };
         }
 
-        const need = 100 + (u.level * 25);
-        const pct = Math.min(
-          Math.floor((u.xp / need) * 100),
-          100
-        );
+        const needed = 100 + user.level * 25;
+        const percent = user.level >= MAX_LEVEL
+          ? 100
+          : Math.min(Math.floor(user.xp / needed * 100), 100);
 
-        const bar =
-          '█'.repeat(Math.floor(pct / 10)) +
-          '░'.repeat(10 - Math.floor(pct / 10));
+        const bar = '█'.repeat(Math.floor(percent / 10)) +
+          '░'.repeat(10 - Math.floor(percent / 10));
 
-        return i.editReply({
-          embeds: [
-            new EmbedBuilder()
-              .setColor('#5865F2')
-              .setTitle(`🌟 Profil de ${i.user.username}`)
-              .setThumbnail(i.user.displayAvatarURL())
-              .addFields(
-                {
-                  name: 'Niveau',
-                  value: `\`${u.level} / ${MAX_LEVEL}\``,
-                  inline: true
-                },
-                {
-                  name: 'XP',
-                  value: `\`${u.xp} / ${need}\``,
-                  inline: true
-                },
-                {
-                  name: 'Progression',
-                  value: `\`${bar}\` **${pct}%**`
-                }
-              )
-              .setFooter({ text: CREATOR })
-          ]
-        });
+        const embed = new EmbedBuilder()
+          .setColor('#5865F2')
+          .setTitle(`🌟 Profil de ${i.user.username}`)
+          .setThumbnail(i.user.displayAvatarURL())
+          .addFields(
+            {
+              name: 'Niveau',
+              value: `\`${user.level} / ${MAX_LEVEL}\``,
+              inline: true
+            },
+            {
+              name: 'XP',
+              value: `\`${user.xp} / ${user.level >= MAX_LEVEL ? 0 : needed}\``,
+              inline: true
+            },
+            {
+              name: 'Progression',
+              value: `\`${bar}\` **${percent}%**`
+            }
+          )
+          .setFooter({ text: CREATOR });
+
+        return i.editReply({ embeds: [embed] });
       }
 
-      // LEADERBOARD
+      // Leaderboard
+      if (command === 'leaderboard') {
+        await i.deferReply();
 
-      if (commandName === 'leaderboard') {
         const top = await db.all(
-          'SELECT * FROM users WHERE guildId = ? ORDER BY level DESC, xp DESC LIMIT 5',
-          [gId]
+          'SELECT * FROM users WHERE guildId = ? ORDER BY level DESC, xp DESC LIMIT 10',
+          [guildId]
         );
 
-        const desc = top.length
-          ? top.map((x, idx) =>
-              `**#${idx + 1}** <@${x.userId}> — Niveau **${x.level}**`
+        const description = top.length
+          ? top.map((u, index) =>
+              `**#${index + 1}** <@${u.userId}> — Niveau **${u.level}**`
             ).join('\n')
-          : 'Aucun classement.';
+          : 'Aucun classement disponible.';
 
         return i.editReply({
           embeds: [
             new EmbedBuilder()
               .setColor('#FFD700')
-              .setTitle('🏆 Classement Global')
-              .setDescription(desc)
+              .setTitle('🏆 CLASSEMENT GLOBAL')
+              .setDescription(description)
               .setFooter({ text: CREATOR })
           ]
         });
       }
 
-      // SETSALON
+      // Set salon
+      if (command === 'setsalon') {
+        await i.deferReply({ ephemeral: true });
 
-      if (commandName === 'setsalon') {
-        const c = options.getChannel('salon');
+        const channel = options.getChannel('salon');
 
         await db.run(
           'INSERT OR REPLACE INTO config (guildId, chanId) VALUES (?, ?)',
-          [gId, c.id]
+          [guildId, channel.id]
         );
 
-        return i.editReply({
-          content: `✅ Salon défini sur <#${c.id}>.`
-        });
+        return i.editReply(`✅ Salon défini sur <#${channel.id}>.`);
       }
 
-      // ADDXP
+      // Add XP
+      if (command === 'addxp') {
+        await i.deferReply({ ephemeral: true });
 
-      if (commandName === 'addxp') {
         const target = options.getUser('membre');
-        const amt = options.getInteger('montant');
+        const amount = options.getInteger('montant');
 
-        let u = await db.get(
+        let user = await db.get(
           'SELECT * FROM users WHERE userId = ? AND guildId = ?',
-          [target.id, gId]
+          [target.id, guildId]
         ) || { xp: 0, level: 0 };
 
-        let xp = u.xp + amt;
-        let lvl = u.level;
+        let xp = user.xp + amount;
+        let level = user.level;
 
-        while (lvl < MAX_LEVEL) {
-          const need = 100 + (lvl * 25);
-
-          if (xp < need) break;
-
-          xp -= need;
-          lvl++;
+        while (level < MAX_LEVEL) {
+          const needed = 100 + level * 25;
+          if (xp < needed) break;
+          xp -= needed;
+          level++;
         }
 
-        if (lvl >= MAX_LEVEL) xp = 0;
+        if (level >= MAX_LEVEL) xp = 0;
 
         await db.run(
           'INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)',
-          [target.id, gId, xp, lvl]
+          [target.id, guildId, xp, level]
         );
 
-        return i.editReply({
-          content: `✅ Ajout de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}/${MAX_LEVEL}).`
-        });
+        return i.editReply(
+          `✅ **${amount} XP** ajouté à <@${target.id}>. Niveau : **${level}/${MAX_LEVEL}**.`
+        );
       }
 
-      // SETLEVEL
+      // Set level
+      if (command === 'setlevel') {
+        await i.deferReply({ ephemeral: true });
 
-      if (commandName === 'setlevel') {
         const target = options.getUser('membre');
-        const lvl = options.getInteger('niveau');
+        const level = options.getInteger('niveau');
 
         await db.run(
           'INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, ?)',
-          [target.id, gId, lvl]
+          [target.id, guildId, level]
         );
 
-        return i.editReply({
-          content: `✅ Niveau de <@${target.id}> fixé à **${lvl}/${MAX_LEVEL}**.`
-        });
+        return i.editReply(
+          `✅ Niveau de <@${target.id}> fixé à **${level}/${MAX_LEVEL}**.`
+        );
       }
 
-      // RESETLEVEL
+      // Reset level
+      if (command === 'resetlevel') {
+        await i.deferReply({ ephemeral: true });
 
-      if (commandName === 'resetlevel') {
         const target = options.getUser('membre');
 
         await db.run(
           'INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)',
-          [target.id, gId]
+          [target.id, guildId]
         );
 
-        return i.editReply({
-          content: `✅ Progression de <@${target.id}> réinitialisée à 0.`
-        });
+        return i.editReply(
+          `✅ Progression de <@${target.id}> réinitialisée.`
+        );
       }
 
-      // MENU VOCAL
+      // Chronomètre
+      if (command === 'chronometre') {
+        await i.deferReply();
 
-      if (commandName === 'menu' && options.getSubcommand() === 'vocal') {
-        const u = await db.get(
-          'SELECT level FROM users WHERE userId = ? AND guildId = ?',
-          [uId, gId]
+        const initial = {
+          elapsedMs: 0,
+          status: 'idle'
+        };
+
+        const payload = chronoPayload(initial);
+        const message = await i.editReply(payload);
+
+        await db.run(
+          `INSERT OR REPLACE INTO chronometers
+          (messageId, guildId, channelId, ownerId, elapsedMs, startedAt, status)
+          VALUES (?, ?, ?, ?, 0, NULL, 'idle')`,
+          [message.id, guildId, message.channelId, userId]
         );
 
-        const lvl = u ? u.level : 0;
+        return;
+      }
 
-        if (lvl < 100) {
-          return i.editReply({
-            content: `⛔ Niveau **100** requis (Ton niveau : ${lvl}).`
-          });
+      // Menu vocal
+      if (command === 'menu' && options.getSubcommand() === 'vocal') {
+        await i.deferReply({ ephemeral: true });
+
+        const user = await db.get(
+          'SELECT level FROM users WHERE userId = ? AND guildId = ?',
+          [userId, guildId]
+        );
+
+        const level = user ? user.level : 0;
+
+        if (level < 100) {
+          return i.editReply(
+            `⛔ Niveau **100** requis. Ton niveau : **${level}**.`
+          );
         }
 
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('v_sel')
-            .setPlaceholder('Choisis une action...')
-            .addOptions([
-              {
-                label: 'Verrouiller (Kick)',
-                value: 'lock_kick',
-                emoji: '🔒'
-              },
-              {
-                label: 'Verrouiller (Kick + Timeout 1 min)',
-                value: 'lock_timeout',
-                emoji: '⚡'
-              },
-              {
-                label: 'Whitelist (Autoriser)',
-                value: 'white',
-                emoji: '✅'
-              },
-              {
-                label: 'Blacklist',
-                value: 'black',
-                emoji: '⛔'
-              },
-              {
-                label: 'Rendre Public',
-                value: 'public',
-                emoji: '🔓'
-              }
-            ])
-        );
+        const menu = new StringSelectMenuBuilder()
+          .setCustomId('v_sel')
+          .setPlaceholder('Choisis une action...')
+          .addOptions(
+            { label: 'Verrouiller (Kick)', value: 'lock_kick', emoji: '🔒' },
+            { label: 'Verrouiller (Kick + Timeout)', value: 'lock_timeout', emoji: '⚡' },
+            { label: 'Whitelist (Autoriser)', value: 'white', emoji: '✅' },
+            { label: 'Blacklist', value: 'black', emoji: '⛔' },
+            { label: 'Rendre public', value: 'public', emoji: '🔓' }
+          );
 
         return i.editReply({
           embeds: [
             new EmbedBuilder()
-              .setColor('#3498db')
-              .setTitle('🛡️ Centre Vocal')
-              .setDescription('Sélectionne une option :')
+              .setColor('#3498DB')
+              .setTitle('🛡️ CENTRE VOCAL')
+              .setDescription('Sélectionne une option.')
           ],
-          components: [row]
+          components: [new ActionRowBuilder().addComponents(menu)]
         });
       }
     }
 
-    // --------------------------
-    // MENUS DE SÉLECTION
-    // --------------------------
+    // BOUTONS DU CHRONOMÈTRE
+    if (i.isButton() && i.customId.startsWith('chrono_')) {
+      const row = await db.get(
+        'SELECT * FROM chronometers WHERE messageId = ?',
+        [i.message.id]
+      );
 
-    if (i.isStringSelectMenu()) {
-
-      const vChan = i.member.voice.channel;
-
-      if (!vChan) {
+      if (!row) {
         return i.reply({
-          content: '❌ Connecte-toi à un salon vocal.',
+          content: '❌ Chronomètre introuvable.',
           ephemeral: true
         });
       }
 
-      const val = i.values[0];
-
-      // MENU PRINCIPAL
-
-      if (i.customId === 'v_sel') {
-
-        if (val === 'lock_kick' || val === 'lock_timeout') {
-          const type = val === 'lock_kick' ? 'kick' : 'timeout';
-
-          await db.run(
-            'INSERT OR REPLACE INTO locks (channelId, ownerId, type) VALUES (?, ?, ?)',
-            [vChan.id, uId, type]
-          );
-
-          return i.update({
-            content: `🔒 Salon verrouillé (${type === 'timeout' ? 'Kick + Timeout 1 min' : 'Kick'}).`,
-            embeds: [],
-            components: []
-          });
-        }
-
-        if (val === 'white' || val === 'black') {
-          const lock = await db.get(
-            'SELECT * FROM locks WHERE channelId = ? AND ownerId = ?',
-            [vChan.id, uId]
-          );
-
-          if (!lock) {
-            return i.reply({
-              content: '❌ Tu ne possèdes pas ce salon verrouillé.',
-              ephemeral: true
-            });
-          }
-
-          const members = vChan.members.filter(m => m.id !== uId);
-
-          if (!members.size) {
-            return i.reply({
-              content: '❌ Personne d’autre dans le salon.',
-              ephemeral: true
-            });
-          }
-
-          const menu = new StringSelectMenuBuilder()
-            .setCustomId(`sub_${val}`)
-            .setPlaceholder('Choisis un membre...')
-            .addOptions(
-              members.map(m => ({
-                label: m.user.username.slice(0, 25),
-                value: m.id
-              }))
-            );
-
-          return i.update({
-            content: 'Choisis le membre :',
-            embeds: [],
-            components: [
-              new ActionRowBuilder().addComponents(menu)
-            ]
-          });
-        }
-
-        if (val === 'public') {
-          await db.run(
-            'DELETE FROM locks WHERE channelId = ? AND ownerId = ?',
-            [vChan.id, uId]
-          );
-
-          await db.run(
-            'DELETE FROM access WHERE channelId = ?',
-            [vChan.id]
-          );
-
-          return i.update({
-            content: '🔓 Salon public.',
-            embeds: [],
-            components: []
-          });
-        }
-      }
-
-      // WHITELIST / BLACKLIST
-
-      if (i.customId === 'sub_white' || i.customId === 'sub_black') {
-        const mode = i.customId === 'sub_white' ? 'white' : 'black';
-
-        const lock = await db.get(
-          'SELECT * FROM locks WHERE channelId = ? AND ownerId = ?',
-          [vChan.id, uId]
-        );
-
-        if (!lock) {
-          return i.reply({
-            content: '❌ Tu ne possèdes pas ce salon verrouillé.',
-            ephemeral: true
-          });
-        }
-
-        const targetId = i.values[0];
-        const targetMem = vChan.members.get(targetId);
-
-        if (!targetMem) {
-          return i.reply({
-            content: '❌ Ce membre ne se trouve plus dans le salon.',
-            ephemeral: true
-          });
-        }
-
-        await db.run(
-          'INSERT OR REPLACE INTO access (channelId, userId, mode) VALUES (?, ?, ?)',
-          [vChan.id, targetId, mode]
-        );
-
-        if (mode === 'black') {
-          await targetMem.voice.disconnect('Blacklisté de la vocale').catch(() => {});
-        }
-
-        return i.update({
-          content: `✅ Action appliquée sur <@${targetId}>.`,
-          embeds: [],
-          components: []
+      if (row.ownerId !== userId && !isAdmin(i)) {
+        return i.reply({
+          content: '⛔ Seul le créateur ou un administrateur peut contrôler ce chronomètre.',
+          ephemeral: true
         });
       }
-    }
 
-  } catch (err) {
-    console.error('[INTERACTION ERROR]', err);
+      await i.deferUpdate();
 
-    if (i.isRepliable() && !i.replied && !i.deferred) {
-      await i.reply({
-        content: '❌ Une erreur est survenue. Consulte les logs du bot.',
-        ephemeral: true
-      }).catch(() => {});
-    } else if (i.isRepliable() && i.deferred) {
-      await i.editReply({
-        content: '❌ Une erreur est survenue. Consulte les logs du bot.',
-        embeds: [],
-        components: []
-      }).catch(() => {});
-    }
-  }
-});
-
-// ==============================
-// ERREURS
-// ==============================
-
-process.on('unhandledRejection', err => {
-  console.error('[UNHANDLED REJECTION]', err);
-});
-
-process.on('uncaughtException', err => {
-  console.error('[UNCAUGHT EXCEPTION]', err);
-});
-
-// ==============================
-// DÉMARRAGE
-// ==============================
-
-async function startBot() {
-  try {
-    if (!process.env.DISCORD_TOKEN) {
-      throw new Error('DISCORD_TOKEN manquant dans les variables Render.');
-    }
-
-    await initDB();
-
-    console.log('[START] Démarrage du bot...');
-
-    await client.login(process.env.DISCORD_TOKEN);
-
-  } catch (err) {
-    console.error('[START ERROR]', err);
-    process.exit(1);
-  }
-}
-
-startBot();
-    
+      const action = i.customId;
+  
