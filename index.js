@@ -1,3 +1,15 @@
+// --- MINI SERVEUR HTTP POUR ÉVITER LE TIMEOUT SUR RENDER ---
+const http = require('http');
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Bot is active and running!');
+});
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`🌐 [HTTP] Serveur en écoute sur le port ${PORT}`);
+});
+// -----------------------------------------------------------
+
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, ActionRowBuilder, StringSelectMenuBuilder } = require('discord.js');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
@@ -237,4 +249,3 @@ process.on('unhandledRejection', error => console.error('Erreur non gérée :', 
 process.on('uncaughtException', error => console.error('Exception non interceptée :', error));
 
 client.login(process.env.DISCORD_TOKEN);
-           
