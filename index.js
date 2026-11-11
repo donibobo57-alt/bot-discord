@@ -1,177 +1,800 @@
-const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
+
 const http = require('http');
-const fs = require('fs');
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+  PermissionFlagsBits,
+  ActionRowBuilder,
+  StringSelectMenuBuilder
+} = require('discord.js');
 
-// --- MINI SERVEUR WEB (pour garder le bot en ligne / Health Check) ---
+const sqlite3 = require('sqlite3').verbose();
+const { open } = require('sqlite');
+
+// ==============================
+// SERVEUR HTTP RENDER
+// ==============================
+
 const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Bot Discord en ligne !');
-});
-serveur.listen(process.env.PORT || 3000, () => {
-    console.log('Mini serveur web actif sur le port 3000');
+  if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ status: 'online' }));
+  }
+
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Discord Bot is running!');
 });
 
-// --- DISCORD CLIENT ---
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`[HTTP] Serveur actif sur le port ${PORT}`);
+});
+
+// ==============================
+// CONFIGURATION
+// ==============================
+
+const CREATOR = 'bankiozi';
+const MAX_LEVEL = 120;
+
 const client = new Client({
-    intentions : [
-        GatewayIntentBits.Guildes,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-    ]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildVoiceStates
+  ]
 });
 
-// Base de données simulée en JSON (ou mémoire)
-const dbFile = './bank_db.json';
-soit bankData = {};
-si (fs.existsSync(dbFile)) {
-    essayer {
-        bankData = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
-    } attraper (e) {
-        bankData = {};
-    }
-} autre {
-    fs.writeFileSync(dbFile, JSON.stringify({}));
+let db;
+
+// ==============================
+// BASE DE DONNÉES
+// ==============================
+
+async function initDB() {
+  db = await open({
+    filename: './database.sqlite',
+    driver: sqlite3.Database
+  });
+
+  await db.exec(`
+    PRAGMA journal_mode = WAL;
+
+    CREATE TABLE IF NOT EXISTS users (
+      userId TEXT,
+      guildId TEXT,
+      xp INTEGER DEFAULT 0,
+      level INTEGER DEFAULT 0,
+      PRIMARY KEY (userId, guildId)
+    );
+
+    CREATE TABLE IF NOT EXISTS config (
+      guildId TEXT PRIMARY KEY,
+      chanId TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS locks (
+      channelId TEXT PRIMARY KEY,
+      ownerId TEXT,
+      type TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS access (
+      channelId TEXT,
+      userId TEXT,
+      mode TEXT,
+      PRIMARY KEY (channelId, userId, mode)
+    );
+  `);
+
+  console.log('[DATABASE] Base de données prête');
 }
 
-fonction saveDb() {
-    fs.writeFileSync(dbFile, JSON.stringify(bankData, null, 2));
+// ==============================
+// COMMANDES DISCORD
+// ==============================
+
+const cmds = [
+  new SlashCommandBuilder()
+    .setName('rank')
+    .setDescription('Ton profil et XP'),
+
+  new SlashCommandBuilder()
+    .setName('leaderboard')
+    .setDescription('Classement du serveur'),
+
+  new SlashCommandBuilder()
+    .setName('setsalon')
+    .setDescription('Salon des niveaux (Admin)')
+    .addChannelOption(o =>
+      o.setName('salon')
+        .setDescription('Salon')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('addxp')
+    .setDescription('Ajouter de l’XP (Admin)')
+    .addUserOption(o =>
+      o.setName('membre')
+        .setDescription('Membre')
+        .setRequired(true)
+    )
+    .addIntegerOption(o =>
+      o.setName('montant')
+        .setDescription('XP à ajouter')
+        .setMinValue(1)
+        .setMaxValue(1000000)
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('setlevel')
+    .setDescription('Modifier le niveau (Admin)')
+    .addUserOption(o =>
+      o.setName('membre')
+        .setDescription('Membre')
+        .setRequired(true)
+    )
+    .addIntegerOption(o =>
+      o.setName('niveau')
+        .setDescription('Niveau entre 0 et 120')
+        .setMinValue(0)
+        .setMaxValue(MAX_LEVEL)
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('resetlevel')
+    .setDescription('Réinitialiser (Admin)')
+    .addUserOption(o =>
+      o.setName('membre')
+        .setDescription('Membre')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('menu')
+    .setDescription('Centre de contrôle')
+    .addSubcommand(s =>
+      s.setName('vocal')
+        .setDescription('Sécurité vocale (Niveau 100+)')
+    )
+].map(c => c.toJSON());
+
+// ==============================
+// VÉRIFICATION ADMIN
+// ==============================
+
+function isAdmin(i) {
+  return (
+    i.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+    i.user.id === i.guild.ownerId
+  );
 }
 
-fonction getUserData(userId) {
-    si (!bankData[userId]) {
-        bankData[userId] = { solde : 100, lastDaily : 0 } ;
-    }
-    renvoyer bankData[userId];
-}
+// ==============================
+// CONNEXION DISCORD
+// ==============================
 
-// Liste des 20 commandes slash
-const commandes = [
-    new SlashCommandBuilder().setName('daily').setDescription('Récupère ta récompense quotidienne de pièces !'),
-    new SlashCommandBuilder().setName('banque').setDescription('Vérifie ton solde bancaire avec une belle carte stylée.'),
-    newSlashCommandBuilder().setName('profile').setDescription('Affiche ton profil complet et ton rang.'),
-    newSlashCommandBuilder().setName('leaderboard').setDescription('Affiche le classement des plus richesses du serveur.'),
-    new SlashCommandBuilder().setName('coinflip').setDescription('Parie tes pièces sur Pile ou Face.').addIntegerOption(o => o.name('mise').setDescription('Montant à miser').setRequired(true)).addStringOption(o => o.name('choix').setDescription('pile ou face').setRequired(true).addChoices({nom : 'Pile', valeur : 'pile'}, {nom : 'Face', valeur : 'face'})),
-    new SlashCommandBuilder().setName('dice').setDescription('Lance un dé (1 à 6). Si tu fais 6, tu gagnes gros !').addIntegerOption(o => o.name('mise').setDescription('Montant à miser').setRequired(true)),
-    new SlashCommandBuilder().setName('slots').setDescription('Joue à la machine à sous !').addIntegerOption(o => o.name('mise').setDescription('Montant à miser').setRequired(true)),
-    new SlashCommandBuilder().setName('work').setDescription('Travail pour gagner un peu d'argent.'),
-    new SlashCommandBuilder().setName('crime').setDescription('Tente un coup risqué (Attention à la prison !).'),
-    new SlashCommandBuilder().setName('rob').setDescription('Tente de voler un utilisateur.').addUserOption(o => o.name('cible').setDescription('Utilisateur à voler').setRequired(true)),
-    new SlashCommandBuilder().setName('deposit').setDescription('Dépose de l'argent en banque.').addIntegerOption(o => o.name('montant').setDescription('Montant à déposer').setRequired(true)),
-    new SlashCommandBuilder().setName('withdraw').setDescription('Retire de l'argent de la banque.').addIntegerOption(o => o.name('montant').setDescription('Montant à retirer').setRequired(true)),
-    new SlashCommandBuilder().setName('pay').setDescription('Envoie de l'argent à un autre utilisateur.').addUserOption(o => o.name('destinataire').setDescription('À qui envoyer').setRequired(true)).addIntegerOption(o => o.name('montant').setDescription('Montant').setRequired(true)),
-    new SlashCommandBuilder().setName('shop').setDescription('Affiche la boutique des rôles et objets exclusifs.'),
-    new SlashCommandBuilder().setName('buy').setDescription('Acheter un article dans la boutique.').addStringOption(o => o.name('article').setDescription('Nom de l'article').setRequired(true)),
-    new SlashCommandBuilder().setName('inventory').setDescription('Affiche ton inventaire personnel.'),
-    new SlashCommandBuilder().setName('lottery').setDescription('Acheter un ticket de loterie.'),
-    new SlashCommandBuilder().setName('rep').setDescription('Donne un point de réputation à un utilisateur.').addUserOption(o => o.name('utilisateur').setDescription('Membre').setRequired(true)),
-    new SlashCommandBuilder().setName('stats').setDescription('Afficher les statistiques globales du bot.'),
-    new SlashCommandBuilder().setName('ping').setDescription('Vérifie la latence du bot et du serveur.')
-].map(cmd => cmd.toJSON());
+client.once('ready', async () => {
+  console.log(`[DISCORD] Connecté : ${client.user.tag}`);
 
-client.once('prêt', async () => {
-    console.log(`Connecté à tant que ${client.user.tag} !`);
-    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN || 'TON_TOKEN_ICI');
-    essayer {
-        console.log('Enregistrement des commandes slash...');
-        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log('Commandes slash enregistrées avec succès !');
-    } attraper (erreur) {
-        console.error(erreur);
-    }
+  try {
+    const rest = new REST({ version: '10' })
+      .setToken(process.env.DISCORD_TOKEN);
+
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      { body: cmds }
+    );
+
+    console.log('[COMMANDS] Commandes synchronisées');
+
+    client.user.setPresence({
+      activities: [{ name: '/menu vocal | 🛡️' }],
+      status: 'online'
+    });
+
+  } catch (err) {
+    console.error('[COMMANDS ERROR]', err);
+  }
 });
 
-client.on('interactionCreate', interaction asynchrone => {
-    si (!interaction.isChatInputCommand()) retourner;
-
-    const { nomCommande, utilisateur, membre } = interaction;
-    const userData = getUserData(user.id);
-
-    // Sécurité : Vérification rôle administrateur (si le rôle est en dessous du bot, bloqué)
-    const adminCommands = ['statistiques', 'boutique']; // Exemple de commandes admin restreintes
-    si (adminCommands.includes(commandName) && membre && client.user) {
-        const botHighestRole = interaction.guild.members.me.roles.highest;
-        const memberHighestRole = member.roles.highest;
-        si (memberHighestRole.position < botHighestRole.position && !member.permissions.has('Administrator')) {
-            const embed = new EmbedBuilder()
-                .setColor(0xFF0000)
-                .setTitle('⛔ Accès Refusé')
-                .setDescription('Tu n'as pas le niveau requis ou ton rôle est en dessous de celui du bot pour exécuter cette commande administrative.')
-                .setTimestamp();
-            return interaction.reply({ embeds: [embed], ephemeral: true });
-        }
-    }
-
-    essayer {
-        si (commandName === 'ping') {
-            const embed = new EmbedBuilder()
-                .setColor(0x0099FF)
-                .setTitle('🏓 Pong !')
-                .setDescription(`Latence du bot : **${client.ws.ping}ms**`)
-                .setTimestamp();
-            attendre interaction.reply({ embeds: [embed] });
-        }
-        sinon si (commandName === 'daily') {
-            const maintenant = Date.maintenant();
-            const cooldown = 24 * 60 * 60 * 1000;
-            si (maintenant - userData.lastDaily < cooldown) {
-                const restant = cooldown - (maintenant - userData.lastDaily);
-                const heures = Math.floor(restant / (1000 * 60 * 60));
-                const embed = new EmbedBuilder()
-                    .setColor(0xFF5733)
-                    .setTitle('⏳ Patientez !')
-                    .setDescription(`Vous avez déjà récupéré votre quotidien. Revenez dans **${hours} heures**.`);
-                return interaction.reply({ embeds: [embed], ephemeral: true });
-            }
-            userData.balance += 500;
-            userData.lastDaily = maintenant;
-            enregistrerDb();
-            const embed = new EmbedBuilder()
-                .setColor(0x00FF00)
-                .setTitle('💰 Récompense quotidienne')
-                .setDescription(`Félicitations ${user}, vous avez reçu **500 pièces** !`)
-                .setTimestamp();
-            attendre interaction.reply({ embeds: [embed] });
-        }
-        sinon si (commandName === 'banque') {
-            // Style demandé : Embleme élégant avec affichage du solde
-            const embed = new EmbedBuilder()
-                .setColor(0x3B82F6) // Bleu moderne
-                .setTitle('🏦 COMPTE BANCAIRE OFFICIEL')
-                .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
-                .ajouterChamps(
-                    { name: '👤 Titulaire', value: `> ${user.username}`, inline: true },
-                    { nom : '💳 Solde Actuel', valeur : `> **${userData.balance} pièces**`, inline : true },
-                    { name: '🛡️ Sécurité', value: '> 🟢 Coffre-fort protégé (Dégradé Rouge & Bleu)', inline: false }
-                )
-                .setImage('https://via.placeholder.com/600x200/1E3A8A/EF4444?text=BANQUE+DEGRADEE+ROUGE+ET+BLEU')
-                .setFooter({ text: 'Système sécurisé par Bot Discord v3.0' })
-                .setTimestamp();
-            attendre interaction.reply({ embeds: [embed] });
-        }
-        autre {
-            // Réponse générique stylée pour les autres commandes casino / économie
-            const embed = new EmbedBuilder()
-                .setColor(0x8B5CF6)
-                .setTitle(`🎰 Commande : /${commandName}`)
-                .setDescription(`Action exécutée avec succès pour **${user.username}** !
-*Le casino et les mini-jeux fonctionnent à merveille.*`)
-                .addFields({ nom : '💎 Solde actuel', valeur : `${userData.balance} pièces`, inline : true })
-                .setTimestamp();
-            attendre interaction.reply({ embeds: [embed] });
-        }
-    } attraper (erreur) {
-        console.error(err);
-        const errorEmbed = new EmbedBuilder()
-            .setColor(0xFF0000)
-            .setTitle('⚠️ Oups ! Une erreur est survenue')
-            .setDescription('Le script a géré proprement l'exception pour éviter tout crash de l'application.')
-            .setTimestamp();
-        si (interaction.différée || interaction.répondue) {
-            await interaction.followUp({ embeds: [errorEmbed], ephemeral: true });
-        } autre {
-            attendre interaction.reply({ embeds: [errorEmbed], ephemeral: true });
-        }
-    }
+client.on('error', err => {
+  console.error('[DISCORD ERROR]', err);
 });
 
-client.login(process.env.DISCORD_TOKEN || 'TON_TOKEN_ICI');
+// ==============================
+// SYSTÈME XP
+// ==============================
+
+client.on('messageCreate', async m => {
+  try {
+    if (m.author.bot || !m.guild || !db) return;
+
+    let u = await db.get(
+      'SELECT * FROM users WHERE userId = ? AND guildId = ?',
+      [m.author.id, m.guild.id]
+    );
+
+    if (!u) {
+      await db.run(
+        'INSERT INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)',
+        [m.author.id, m.guild.id]
+      );
+
+      u = { xp: 0, level: 0 };
+    }
+
+    if (u.level >= MAX_LEVEL) return;
+
+    let xp = u.xp + 15;
+    let lvl = u.level;
+    let need = 100 + (lvl * 25);
+
+    if (xp >= need) {
+      xp -= need;
+      lvl++;
+
+      if (lvl >= MAX_LEVEL) {
+        lvl = MAX_LEVEL;
+        xp = 0;
+      }
+
+      let cfg = await db.get(
+        'SELECT chanId FROM config WHERE guildId = ?',
+        [m.guild.id]
+      );
+
+      let chan = cfg
+        ? m.guild.channels.cache.get(cfg.chanId) || m.channel
+        : m.channel;
+
+      if (chan) {
+        await chan.send({
+          embeds: [
+            new EmbedBuilder()
+              .setColor('#00FFCC')
+              .setTitle('🎉 NOUVEAU NIVEAU !')
+              .setDescription(
+                `Félicitations <@${m.author.id}>, tu passes au **niveau ${lvl}** ! 🚀`
+              )
+              .setFooter({ text: CREATOR })
+          ]
+        }).catch(() => {});
+      }
+    }
+
+    await db.run(
+      'UPDATE users SET xp = ?, level = ? WHERE userId = ? AND guildId = ?',
+      [xp, lvl, m.author.id, m.guild.id]
+    );
+
+  } catch (err) {
+    console.error('[XP ERROR]', err);
+  }
+});
+
+// ==============================
+// SÉCURITÉ VOCALE
+// ==============================
+
+client.on('voiceStateUpdate', async (oldS, newS) => {
+  try {
+    if (!newS.channelId || !newS.member || !db) return;
+
+    // Ignorer les changements qui ne sont pas une entrée ou un déplacement.
+    if (oldS.channelId === newS.channelId) return;
+
+    if (newS.member.user.bot) return;
+
+    const channelId = newS.channelId;
+    const memberId = newS.member.id;
+
+    const black = await db.get(
+      "SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'black'",
+      [channelId, memberId]
+    );
+
+    if (black) {
+      await newS.member.voice.disconnect('Blacklisté de ce salon').catch(() => {});
+      return;
+    }
+
+    const lock = await db.get(
+      'SELECT * FROM locks WHERE channelId = ?',
+      [channelId]
+    );
+
+    if (!lock || memberId === lock.ownerId) return;
+
+    const white = await db.get(
+      "SELECT * FROM access WHERE channelId = ? AND userId = ? AND mode = 'white'",
+      [channelId, memberId]
+    );
+
+    if (white) return;
+
+    await newS.member.voice.disconnect('Salon verrouillé').catch(() => {});
+
+    if (lock.type === 'timeout') {
+      await newS.member.timeout(
+        60000,
+        'Tentative d’intrusion dans un salon vocal verrouillé'
+      ).catch(() => {});
+    }
+
+  } catch (err) {
+    console.error('[VOICE ERROR]', err);
+  }
+});
+
+// ==============================
+// INTERACTIONS
+// ==============================
+
+client.on('interactionCreate', async i => {
+  if (!i.guild || !db) return;
+
+  const gId = i.guild.id;
+  const uId = i.user.id;
+
+  try {
+
+    // --------------------------
+    // COMMANDES
+    // --------------------------
+
+    if (i.isChatInputCommand()) {
+      const { commandName, options } = i;
+
+      const adminCommands = [
+        'setsalon',
+        'addxp',
+        'setlevel',
+        'resetlevel'
+      ];
+
+      const ephemeral =
+        adminCommands.includes(commandName) ||
+        commandName === 'menu';
+
+      await i.deferReply({ ephemeral });
+
+      if (adminCommands.includes(commandName) && !isAdmin(i)) {
+        return i.editReply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor('#FF0033')
+              .setTitle('🚨 ACCÈS REFUSÉ')
+              .setDescription(
+                'Cette commande est réservée aux administrateurs.'
+              )
+              .setFooter({ text: CREATOR })
+          ]
+        });
+      }
+
+      // RANK
+
+      if (commandName === 'rank') {
+        let u = await db.get(
+          'SELECT * FROM users WHERE userId = ? AND guildId = ?',
+          [uId, gId]
+        );
+
+        if (!u) {
+          await db.run(
+            'INSERT INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)',
+            [uId, gId]
+          );
+
+          u = { xp: 0, level: 0 };
+        }
+
+        const need = 100 + (u.level * 25);
+        const pct = Math.min(
+          Math.floor((u.xp / need) * 100),
+          100
+        );
+
+        const bar =
+          '█'.repeat(Math.floor(pct / 10)) +
+          '░'.repeat(10 - Math.floor(pct / 10));
+
+        return i.editReply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor('#5865F2')
+              .setTitle(`🌟 Profil de ${i.user.username}`)
+              .setThumbnail(i.user.displayAvatarURL())
+              .addFields(
+                {
+                  name: 'Niveau',
+                  value: `\`${u.level} / ${MAX_LEVEL}\``,
+                  inline: true
+                },
+                {
+                  name: 'XP',
+                  value: `\`${u.xp} / ${need}\``,
+                  inline: true
+                },
+                {
+                  name: 'Progression',
+                  value: `\`${bar}\` **${pct}%**`
+                }
+              )
+              .setFooter({ text: CREATOR })
+          ]
+        });
+      }
+
+      // LEADERBOARD
+
+      if (commandName === 'leaderboard') {
+        const top = await db.all(
+          'SELECT * FROM users WHERE guildId = ? ORDER BY level DESC, xp DESC LIMIT 5',
+          [gId]
+        );
+
+        const desc = top.length
+          ? top.map((x, idx) =>
+              `**#${idx + 1}** <@${x.userId}> — Niveau **${x.level}**`
+            ).join('\n')
+          : 'Aucun classement.';
+
+        return i.editReply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor('#FFD700')
+              .setTitle('🏆 Classement Global')
+              .setDescription(desc)
+              .setFooter({ text: CREATOR })
+          ]
+        });
+      }
+
+      // SETSALON
+
+      if (commandName === 'setsalon') {
+        const c = options.getChannel('salon');
+
+        await db.run(
+          'INSERT OR REPLACE INTO config (guildId, chanId) VALUES (?, ?)',
+          [gId, c.id]
+        );
+
+        return i.editReply({
+          content: `✅ Salon défini sur <#${c.id}>.`
+        });
+      }
+
+      // ADDXP
+
+      if (commandName === 'addxp') {
+        const target = options.getUser('membre');
+        const amt = options.getInteger('montant');
+
+        let u = await db.get(
+          'SELECT * FROM users WHERE userId = ? AND guildId = ?',
+          [target.id, gId]
+        ) || { xp: 0, level: 0 };
+
+        let xp = u.xp + amt;
+        let lvl = u.level;
+
+        while (lvl < MAX_LEVEL) {
+          const need = 100 + (lvl * 25);
+
+          if (xp < need) break;
+
+          xp -= need;
+          lvl++;
+        }
+
+        if (lvl >= MAX_LEVEL) xp = 0;
+
+        await db.run(
+          'INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, ?, ?)',
+          [target.id, gId, xp, lvl]
+        );
+
+        return i.editReply({
+          content: `✅ Ajout de **${amt} XP** à <@${target.id}> (Niveau : ${lvl}/${MAX_LEVEL}).`
+        });
+      }
+
+      // SETLEVEL
+
+      if (commandName === 'setlevel') {
+        const target = options.getUser('membre');
+        const lvl = options.getInteger('niveau');
+
+        await db.run(
+          'INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, ?)',
+          [target.id, gId, lvl]
+        );
+
+        return i.editReply({
+          content: `✅ Niveau de <@${target.id}> fixé à **${lvl}/${MAX_LEVEL}**.`
+        });
+      }
+
+      // RESETLEVEL
+
+      if (commandName === 'resetlevel') {
+        const target = options.getUser('membre');
+
+        await db.run(
+          'INSERT OR REPLACE INTO users (userId, guildId, xp, level) VALUES (?, ?, 0, 0)',
+          [target.id, gId]
+        );
+
+        return i.editReply({
+          content: `✅ Progression de <@${target.id}> réinitialisée à 0.`
+        });
+      }
+
+      // MENU VOCAL
+
+      if (commandName === 'menu' && options.getSubcommand() === 'vocal') {
+        const u = await db.get(
+          'SELECT level FROM users WHERE userId = ? AND guildId = ?',
+          [uId, gId]
+        );
+
+        const lvl = u ? u.level : 0;
+
+        if (lvl < 100) {
+          return i.editReply({
+            content: `⛔ Niveau **100** requis (Ton niveau : ${lvl}).`
+          });
+        }
+
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('v_sel')
+            .setPlaceholder('Choisis une action...')
+            .addOptions([
+              {
+                label: 'Verrouiller (Kick)',
+                value: 'lock_kick',
+                emoji: '🔒'
+              },
+              {
+                label: 'Verrouiller (Kick + Timeout 1 min)',
+                value: 'lock_timeout',
+                emoji: '⚡'
+              },
+              {
+                label: 'Whitelist (Autoriser)',
+                value: 'white',
+                emoji: '✅'
+              },
+              {
+                label: 'Blacklist',
+                value: 'black',
+                emoji: '⛔'
+              },
+              {
+                label: 'Rendre Public',
+                value: 'public',
+                emoji: '🔓'
+              }
+            ])
+        );
+
+        return i.editReply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor('#3498db')
+              .setTitle('🛡️ Centre Vocal')
+              .setDescription('Sélectionne une option :')
+          ],
+          components: [row]
+        });
+      }
+    }
+
+    // --------------------------
+    // MENUS DE SÉLECTION
+    // --------------------------
+
+    if (i.isStringSelectMenu()) {
+
+      const vChan = i.member.voice.channel;
+
+      if (!vChan) {
+        return i.reply({
+          content: '❌ Connecte-toi à un salon vocal.',
+          ephemeral: true
+        });
+      }
+
+      const val = i.values[0];
+
+      // MENU PRINCIPAL
+
+      if (i.customId === 'v_sel') {
+
+        if (val === 'lock_kick' || val === 'lock_timeout') {
+          const type = val === 'lock_kick' ? 'kick' : 'timeout';
+
+          await db.run(
+            'INSERT OR REPLACE INTO locks (channelId, ownerId, type) VALUES (?, ?, ?)',
+            [vChan.id, uId, type]
+          );
+
+          return i.update({
+            content: `🔒 Salon verrouillé (${type === 'timeout' ? 'Kick + Timeout 1 min' : 'Kick'}).`,
+            embeds: [],
+            components: []
+          });
+        }
+
+        if (val === 'white' || val === 'black') {
+          const lock = await db.get(
+            'SELECT * FROM locks WHERE channelId = ? AND ownerId = ?',
+            [vChan.id, uId]
+          );
+
+          if (!lock) {
+            return i.reply({
+              content: '❌ Tu ne possèdes pas ce salon verrouillé.',
+              ephemeral: true
+            });
+          }
+
+          const members = vChan.members.filter(m => m.id !== uId);
+
+          if (!members.size) {
+            return i.reply({
+              content: '❌ Personne d’autre dans le salon.',
+              ephemeral: true
+            });
+          }
+
+          const menu = new StringSelectMenuBuilder()
+            .setCustomId(`sub_${val}`)
+            .setPlaceholder('Choisis un membre...')
+            .addOptions(
+              members.map(m => ({
+                label: m.user.username.slice(0, 25),
+                value: m.id
+              }))
+            );
+
+          return i.update({
+            content: 'Choisis le membre :',
+            embeds: [],
+            components: [
+              new ActionRowBuilder().addComponents(menu)
+            ]
+          });
+        }
+
+        if (val === 'public') {
+          await db.run(
+            'DELETE FROM locks WHERE channelId = ? AND ownerId = ?',
+            [vChan.id, uId]
+          );
+
+          await db.run(
+            'DELETE FROM access WHERE channelId = ?',
+            [vChan.id]
+          );
+
+          return i.update({
+            content: '🔓 Salon public.',
+            embeds: [],
+            components: []
+          });
+        }
+      }
+
+      // WHITELIST / BLACKLIST
+
+      if (i.customId === 'sub_white' || i.customId === 'sub_black') {
+        const mode = i.customId === 'sub_white' ? 'white' : 'black';
+
+        const lock = await db.get(
+          'SELECT * FROM locks WHERE channelId = ? AND ownerId = ?',
+          [vChan.id, uId]
+        );
+
+        if (!lock) {
+          return i.reply({
+            content: '❌ Tu ne possèdes pas ce salon verrouillé.',
+            ephemeral: true
+          });
+        }
+
+        const targetId = i.values[0];
+        const targetMem = vChan.members.get(targetId);
+
+        if (!targetMem) {
+          return i.reply({
+            content: '❌ Ce membre ne se trouve plus dans le salon.',
+            ephemeral: true
+          });
+        }
+
+        await db.run(
+          'INSERT OR REPLACE INTO access (channelId, userId, mode) VALUES (?, ?, ?)',
+          [vChan.id, targetId, mode]
+        );
+
+        if (mode === 'black') {
+          await targetMem.voice.disconnect('Blacklisté de la vocale').catch(() => {});
+        }
+
+        return i.update({
+          content: `✅ Action appliquée sur <@${targetId}>.`,
+          embeds: [],
+          components: []
+        });
+      }
+    }
+
+  } catch (err) {
+    console.error('[INTERACTION ERROR]', err);
+
+    if (i.isRepliable() && !i.replied && !i.deferred) {
+      await i.reply({
+        content: '❌ Une erreur est survenue. Consulte les logs du bot.',
+        ephemeral: true
+      }).catch(() => {});
+    } else if (i.isRepliable() && i.deferred) {
+      await i.editReply({
+        content: '❌ Une erreur est survenue. Consulte les logs du bot.',
+        embeds: [],
+        components: []
+      }).catch(() => {});
+    }
+  }
+});
+
+// ==============================
+// ERREURS
+// ==============================
+
+process.on('unhandledRejection', err => {
+  console.error('[UNHANDLED REJECTION]', err);
+});
+
+process.on('uncaughtException', err => {
+  console.error('[UNCAUGHT EXCEPTION]', err);
+});
+
+// ==============================
+// DÉMARRAGE
+// ==============================
+
+async function startBot() {
+  try {
+    if (!process.env.DISCORD_TOKEN) {
+      throw new Error('DISCORD_TOKEN manquant dans les variables Render.');
+    }
+
+    await initDB();
+
+    console.log('[START] Démarrage du bot...');
+
+    await client.login(process.env.DISCORD_TOKEN);
+
+  } catch (err) {
+    console.error('[START ERROR]', err);
+    process.exit(1);
+  }
+}
+
+startBot();
+    
